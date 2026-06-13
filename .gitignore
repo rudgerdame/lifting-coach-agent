@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+
+# Data & models (never commit personal logs)
+data/personal/
+data/raw/
+*.sqlite
+*.db
+models/artifacts/
+index/store/
+*.faiss
+*.pkl
+*.joblib
+
+# Eval outputs (regenerate in CI/demo)
+eval/*.png
+eval/shap_*.png
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
