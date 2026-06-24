@@ -75,7 +75,7 @@ One row per training session, used for ML:
 | `sleep_lag_2d` | Sleep hours on prior calendar day |
 | `resting_hr_lag_1d` | Resting HR (bpm) on session date |
 | `resting_hr_trailing_7` | Mean resting HR over prior 7 days (pre-workout shifted) |
-| `performance_delta` | Target: top_set_e1rm vs recent trend |
+| `performance_delta` | Target (kg): `top_set_e1rm_kg − e1rm_trend`, where `e1rm_trend` = mean of prior **3 same-exercise** top-set e1RMs (current session excluded). **Not** vs last session's 1RM alone — see [`feature-engineering.md`](feature-engineering.md#performance_delta-kg) |
 
 ## Versioning
 

@@ -4,48 +4,48 @@
 
 ## Validation
 
-- **Data source:** Gravity OS (C:\Users\rhdam\graVityOS-Project\graVityOS\Data)
+- **Data source:** Synthetic demo (data/synthetic)
 - **Split:** expanding-window walk-forward (3 folds, min 50% of timeline for first train window)
 - **Target:** `performance_delta` (kg) — top-set e1RM minus prior-3-**same-exercise**-session trend
 - **Model:** LightGBM (Huber loss, α=1.0) — **pre-workout features only** (no same-day sets/volume/intensity); categorical `exercise`, `muscle_group`, `split`
 - **Evaluation policy:** MAE and calibration use raw model predictions (no post-processing).
-- **Continuity filter:** exclude exercise-sessions with max working weight drop > 20% vs prior same-exercise log (132 excluded, 1952 raw rows)
-- **Training rows:** 1060 (after continuity filter + feature completeness)
+- **Continuity filter:** exclude exercise-sessions with max working weight drop > 20% vs prior same-exercise log (78 excluded, 2058 raw rows)
+- **Training rows:** 1184 (after continuity filter + feature completeness)
 
 ## Walk-forward CV — MAE on performance_delta (kg)
 
 | Fold | Test period | Train n | Test n | LightGBM | Linear | Naive (0) | Naive (global mean) | Naive (per-exercise mean) |
 |------|-------------|---------|--------|----------|--------|-----------|----------------------|---------------------------|
-| 1 | 2025-08-14 → 2025-11-13 | 595 | 170 | 4.56 | 6.24 | 5.81 | 5.47 | 4.99 |
-| 2 | 2025-11-14 → 2026-03-06 | 765 | 131 | 5.21 | 6.77 | 5.98 | 6.18 | 5.53 |
-| 3 | 2026-03-07 → 2026-06-03 | 896 | 164 | 5.66 | 6.80 | 5.63 | 6.45 | 6.26 |
+| 1 | 2025-08-09 → 2025-11-24 | 582 | 197 | 3.94 | 4.93 | 4.15 | 4.06 | 4.07 |
+| 2 | 2025-12-01 → 2026-03-23 | 779 | 207 | 4.07 | 4.33 | 4.27 | 4.14 | 4.19 |
+| 3 | 2026-03-24 → 2026-06-18 | 986 | 198 | 5.94 | 5.74 | 6.68 | 6.46 | 6.41 |
 
-**LightGBM mean ± std:** 5.14 ± 0.45 kg  
-**Naive mean (0):** 5.80 kg  
-**Naive mean (global):** 6.03 kg  
-**Naive mean (per-exercise):** 5.59 kg
+**LightGBM mean ± std:** 4.65 ± 0.92 kg  
+**Naive mean (0):** 5.03 kg  
+**Naive mean (global):** 4.89 kg  
+**Naive mean (per-exercise):** 4.89 kg
 
 ## Last fold (most recent held-out window)
 
 | Model | MAE |
 |-------|-----|
-| LightGBM | 5.66 |
-| Linear baseline | 6.80 |
-| Naive (at trend = 0) | 5.63 |
-| Naive (global train mean) | 6.45 |
-| Naive (per-exercise train mean) | 6.26 |
+| LightGBM | 5.94 |
+| Linear baseline | 5.74 |
+| Naive (at trend = 0) | 6.68 |
+| Naive (global train mean) | 6.46 |
+| Naive (per-exercise train mean) | 6.41 |
 
 ## Calibration (walk-forward OOF)
 
 ![Calibration plot](calibration_plot.png)
 
-- **OOF sessions:** 465 of 1060 training rows (44%; first 50% of timeline is train-only burn-in)
-- **OOF pred range:** -0.16 to +11.09 kg
-- **OOF LightGBM MAE:** 5.13 kg
-- **OOF Naive MAE:** 5.79 kg
-- **OOF Naive (global mean) MAE:** 6.02 kg
-- **OOF Naive (per-exercise mean) MAE:** 5.59 kg
-- **Mean actual delta:** +4.03 kg (naive bias if predicting 0)
+- **OOF sessions:** 602 of 1184 training rows (51%; first 50% of timeline is train-only burn-in)
+- **OOF pred range:** -4.17 to +6.82 kg
+- **OOF LightGBM MAE:** 4.64 kg
+- **OOF Naive MAE:** 5.02 kg
+- **OOF Naive (global mean) MAE:** 4.88 kg
+- **OOF Naive (per-exercise mean) MAE:** 4.88 kg
+- **Mean actual delta:** +0.96 kg (naive bias if predicting 0)
 
 Decile bins on OOF predictions (equal count per bin). Axes fit data ± 1 kg. Points on the diagonal = well calibrated.
 
@@ -55,30 +55,31 @@ Decile bins on OOF predictions (equal count per bin). Axes fit data ± 1 kg. Poi
 
 | Feature | mean \|SHAP\| |
 |---------|-------------|
-| exercise | 1.361 |
-| resting_hr_trailing_7 | 0.373 |
-| acwr | 0.320 |
-| sleep_lag_2d | 0.166 |
-| muscle_group | 0.143 |
-| calories_trailing_7 | 0.134 |
-| volume_trailing_7d | 0.119 |
-| calories_deviation | 0.100 |
-| volume_wow_pct | 0.067 |
-| sleep_deviation | 0.065 |
-| days_since_last_session | 0.054 |
-| carbs_trailing_7 | 0.053 |
+| sleep_lag_1d | 1.019 |
+| protein_trailing_7 | 0.320 |
+| resting_hr_lag_1d | 0.278 |
+| sleep_lag_2d | 0.257 |
+| sleep_deviation | 0.235 |
+| bodyweight_kg | 0.226 |
+| sleep_imputed | 0.221 |
+| bodyweight_trailing_7 | 0.158 |
+| carbs_trailing_7 | 0.149 |
+| sleep_trailing_7d | 0.121 |
+| resting_hr_deviation | 0.100 |
+| days_since_last_session | 0.081 |
 
 ## Univariate feature plots (OOF)
 
 ![Feature univariate plots](feature_univariate_plots.png)
 
-Top-8 numeric SHAP features: `resting_hr_trailing_7`, `acwr`, `sleep_lag_2d`, `calories_trailing_7`, `volume_trailing_7d`, `calories_deviation`, `volume_wow_pct`, `sleep_deviation`. Feature split into deciles (x = mean feature value per decile); y = mean actual (blue) vs mean OOF predicted (orange) `performance_delta`.
+Top-8 numeric SHAP features: `sleep_lag_1d`, `protein_trailing_7`, `resting_hr_lag_1d`, `sleep_lag_2d`, `sleep_deviation`, `bodyweight_kg`, `bodyweight_trailing_7`, `carbs_trailing_7`. Feature split into deciles (x = mean feature value per decile); y = mean actual (blue) vs mean OOF predicted (orange) `performance_delta`.
 
 ## Limitations
 
-- Trained on personal logs — do not commit artifacts or reports with identifiable data.
+- **Synthetic demo data** — `data/synthetic`. No personal workout/recovery rows are in this repo.
+- Reproduce these metrics: `python -m models.train --data-dir data/synthetic`.
 - Exercise-sessions flagged `continuity_break` (likely equipment/gym change) are excluded from train/eval; e1RM trend resets per segment.
 - Correlation ≠ causation for sleep/calorie/macro features.
-- Small-n risk on personal data.
+- Walk-forward LightGBM modestly beats naive-at-trend on this demo set; last fold can be near parity.
 - Random splits would inflate metrics — walk-forward only.
 - Final artifact is fit on **all** data after CV evaluation.

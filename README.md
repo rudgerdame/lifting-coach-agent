@@ -35,7 +35,7 @@ An ML + GenAI system that ingests strength-training logs plus recovery signals (
 | `features/` | Pre-workout feature pipeline, ACWR, anomaly imputation, 20% continuity filter |
 | `models/train.py` | LightGBM (Huber), 3-fold walk-forward CV, decile calibration plot, SHAP |
 | `models/baselines.py` | Naive-at-trend, global mean, per-exercise mean |
-| `eval/` | `model_report.md`, `calibration_plot.png`, `shap_summary.png` (from `train.py`) |
+| `eval/` | `model_report.md`, calibration + SHAP plots — **synthetic demo only** (regenerate before commit) |
 | `scripts/run_demo.ps1` | One command: synthetic → train → eval artifacts |
 | `docs/` | Data schema + feature engineering reference |
 
@@ -43,7 +43,7 @@ An ML + GenAI system that ingests strength-training logs plus recovery signals (
 
 | Path | Notes |
 |------|-------|
-| `agent/`, `api/`, `index/` | LangGraph agent, FastAPI, FAISS RAG |
+| `agent/`, `api/`, `index/` | LangGraph agent, research corpus RAG, workout planner, FastAPI |
 | `eval/gold_qa.jsonl`, `eval/run_all.py` | Agent eval harness |
 | `Dockerfile`, `docker-compose.yml` | Container deploy |
 
@@ -70,10 +70,13 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 
 ### Milestone 3 — Agent + RAG (P1)
 
-- [ ] Small methodology corpus in `index/corpus/` (5–10 markdown snippets)
-- [ ] FAISS index build + retrieval
-- [ ] LangGraph agent with tools: `query_history`, `predict_readiness`, `plan_block`, `explain`
-- [ ] Answers cite session history + model output
+- [ ] **Research corpus** in `index/corpus/` — curated, citable sources the agent can retrieve (hypertrophy volume landmarks, progressive overload, deload/fatigue management, recovery sleep/nutrition summaries); start with 5–10 markdown snippets, expand to papers/guides as needed
+- [ ] FAISS index build + retrieval over corpus (and optionally user log excerpts)
+- [ ] **User workout preferences** (`index/corpus/personal_preferences.md`) — PPL split; infer next session from last **3–5** logged workout days; treat exercises in history as preferred; derive typical sets/reps from user's logs
+- [ ] LangGraph agent with tools: `query_history`, `predict_readiness`, `plan_workout`, `plan_block`, `explain`
+- [ ] **`plan_workout` tool** — infer next split from recent rotation, pick exercises from history for that split, propose **sets × reps × load** from logged patterns + readiness signal (hypertrophy-oriented; deload when load/recovery flags are high)
+- [ ] **Coaching policy doc** (TBD) — conservative vs aggressive loading rules tied to model uncertainty
+- [ ] Answers cite **session history + model output + retrieved research** (no unsourced coaching claims)
 
 ### Milestone 4 — Eval + monitoring (P1)
 
@@ -86,7 +89,7 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 
 - [ ] FastAPI + minimal Streamlit UI
 - [x] `scripts/run_demo.ps1` — synthetic → train → eval
-- [ ] README: fill limitations section with real metrics after first run
+- [x] README: synthetic demo limitations + walk-forward metrics (see below)
 - [ ] Demo GIF or asciinema
 - [ ] Inference latency note (Ollama vs hosted)
 
@@ -98,8 +101,9 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 
 - Synthetic data path (repo runs without private data)
 - LightGBM readiness model + SHAP + time-based CV
-- LangGraph agent (2–4 tools)
-- FAISS over small methodology corpus
+- LangGraph agent (history, readiness, workout planning, explain)
+- FAISS over methodology + hypertrophy research corpus
+- User preferred exercises/split stored for personalized plan generation
 - Eval harness + honest limitations section
 - Provider swap via `LLM_PROVIDER` / `OPENAI_BASE_URL`
 - Fitbod CSV ingestion
@@ -119,8 +123,9 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 | Phase | Work |
 |-------|------|
 | Phase 2 | Point coach at real Fitbod + Apple Health via `GRAVITYOS_DATA_DIR`; homelab deploy on Brethren |
-| Phase 3 | Minimal iOS logger — local store + JSON/CSV export matching `docs/data-schema.md` |
-| Phase 4 | Shared FastAPI backend; app sync; Telegram coaching hook (reuse Gravity OS pattern) |
+| Phase 3 | Expand research corpus; hypertrophy plan generator (exercise × sets × reps) tuned to user preferences and readiness model |
+| Phase 4 | Minimal iOS logger — local store + JSON/CSV export matching `docs/data-schema.md` |
+| Phase 5 | Shared FastAPI backend; app sync; Telegram coaching hook (reuse Gravity OS pattern) |
 
 ---
 
@@ -164,7 +169,8 @@ Training logs (CSV) + Sleep/Calorie data (CSV/Apple Health)
    → Feature pipeline (1RM, volume, ACWR, recovery trailing/deviation/lags)
    → ML model (LightGBM) → readiness/performance prediction + SHAP
    → FAISS index (methodology corpus + user history)
-   → Agent (LangGraph): tools = {query_history, predict_readiness, plan_block, explain}
+   → Agent (LangGraph): tools = {query_history, predict_readiness, plan_workout, plan_block, explain}
+   → Research corpus (FAISS) grounds hypertrophy/set-rep recommendations
    → FastAPI + Streamlit UI, traced (LangSmith/Phoenix)
 ```
 
@@ -176,8 +182,8 @@ Training logs (CSV) + Sleep/Calorie data (CSV/Apple Health)
 |---|---|
 | Develop & deploy ML models | Trained tabular model (gradient-boosted / regression) predicting session performance & readiness |
 | Develop & deploy LLMs | Local open model via Ollama/vLLM (OpenAI-compatible), provider-swappable to hosted API |
-| Build AI agents (agentic frameworks) | LangGraph agent: tools = `{query_history, predict_readiness, plan_block, explain}` |
-| RAG + vector DBs (FAISS/Pinecone/OpenSearch) | FAISS index over training-methodology corpus + the user's own logs |
+| Build AI agents (agentic frameworks) | LangGraph agent: tools = `{query_history, predict_readiness, plan_workout, plan_block, explain}` |
+| RAG + vector DBs (FAISS/Pinecone/OpenSearch) | FAISS over hypertrophy/methodology research corpus + optional user log retrieval |
 | Optimize model inference | Ollama serving + tokens/sec or latency note; optional vLLM benchmark |
 | MLOps pipelines (train/eval/deploy) | Ingestion → feature pipeline → train → eval → serve; Dockerized, one-command run |
 | Evaluation & monitoring | Time-series CV eval + answer-faithfulness eval; LangSmith/Phoenix tracing |
@@ -228,7 +234,8 @@ Full formulas, anomaly detection, and diligence rationale: [`docs/feature-engine
 
 ## Modeling
 
-- **Target:** session performance delta — did the top-set estimated-1RM beat the recent trend? (regression on delta, or 3-class: over / at / under-perform).
+- **Target:** `performance_delta` (kg) — how much the session's **top-set estimated 1RM** beats or misses your **3-session rolling trend for that same exercise** (not your last workout's 1RM, not raw strength). Formula: `top_set_e1rm_kg − mean(prior 3 same-exercise top-set e1RMs)`. Full definition: [`docs/feature-engineering.md`](docs/feature-engineering.md#performance_delta-kg).
+- **Prediction output:** the model returns this delta in kg (e.g. `+2` = likely above trend, `−3` = likely below). It does not output absolute weight × reps unless combined with trend.
 - **Model:** LightGBM (Huber loss); compare against linear + naive baselines.
 - **Validation:** expanding-window **walk-forward CV** (3 folds); report MAE vs naive-at-trend.
 - **Interpretability:** SHAP feature importance — headline output like *"+1h trailing sleep ≈ +X lbs top set."*
@@ -284,13 +291,20 @@ lifting-coach-agent/
 
 ## Limitations & honest caveats
 
-*(Fill in with real numbers after first model run.)*
+**All committed eval artifacts (`eval/model_report.md`, plots) are generated from synthetic demo data only.** Personal Gravity OS runs stay local via `GRAVITYOS_DATA_DIR`.
 
-- Small-n: personal logs may not generalize.
+| Metric (walk-forward OOF) | Synthetic demo | Gravity OS (local reference) |
+|---------------------------|----------------|------------------------------|
+| Training rows | 1,184 | ~1,060 |
+| LightGBM MAE | 4.64 kg | ~5.13 kg |
+| Naive (0) MAE | 5.03 kg | ~5.79 kg |
+| Mean actual delta | +1.09 kg | ~+4.03 kg |
+
 - Correlation ≠ causation (sleep → performance is observational).
 - Confounding by deloads, illness, exercise swaps.
 - No RPE — objective proxies only.
 - Time-based validation required; random splits would inflate metrics.
+- Agent, API, and RAG layers are not implemented yet (model pipeline only).
 
 ---
 

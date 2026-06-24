@@ -38,6 +38,8 @@ Where:
 
 **Important:** The trend is **session-ordered per exercise**, not calendar-ordered. If your last bench press was 10 days ago and you trained legs/back in between, the trend uses your last 3 bench sessions only — not whatever you did on prior calendar days. `days_since_last_session` captures the calendar gap explicitly as a separate feature.
 
+**Not the same as "beat last time":** `e1rm_trend` is the **mean** of your prior 3 top-set e1RMs for that exercise — not a single previous session. If your last bench was 100 kg but the 3-session average is 96 kg, beating last time (+1 kg) is different from beating trend (+4 kg to hit 100). The model predicts deviation from the **rolling trend**, not vs your most recent 1RM or PR.
+
 **Continuity segments:** After a `continuity_break` flag (see below), the trend resets — prior sessions on old equipment do not anchor the trend for the new segment.
 
 **Why this target**
