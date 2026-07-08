@@ -230,8 +230,11 @@ def _add_continuity_flags(sessions: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _add_recovery_features(recovery_daily: pd.DataFrame) -> pd.DataFrame:
-    recovery = impute_bad_recovery(recovery_daily)
+def _add_recovery_features(
+    recovery_daily: pd.DataFrame,
+    already_imputed: bool = False,
+) -> pd.DataFrame:
+    recovery = recovery_daily if already_imputed else impute_bad_recovery(recovery_daily)
     recovery = recovery.sort_values("date")
 
     def _rolling_block(col: str, prefix: str) -> None:
@@ -291,9 +294,12 @@ _RECOVERY_PREWORKOUT_SHIFT = (
 )
 
 
-def _recovery_for_preworkout(recovery_daily: pd.DataFrame) -> pd.DataFrame:
+def _recovery_for_preworkout(
+    recovery_daily: pd.DataFrame,
+    already_imputed: bool = False,
+) -> pd.DataFrame:
     """Recovery features as known before today's gym session."""
-    recovery = _add_recovery_features(recovery_daily)
+    recovery = _add_recovery_features(recovery_daily, already_imputed=already_imputed)
     for col in _RECOVERY_PREWORKOUT_SHIFT:
         if col in recovery.columns:
             recovery[col] = recovery[col].shift(1)
@@ -303,6 +309,7 @@ def _recovery_for_preworkout(recovery_daily: pd.DataFrame) -> pd.DataFrame:
 def build_session_features(
     workout_sets: pd.DataFrame,
     recovery_daily: pd.DataFrame,
+    _recovery_already_imputed: bool = False,
 ) -> pd.DataFrame:
     """
     Aggregate sets to session-level features.
@@ -310,6 +317,9 @@ def build_session_features(
     Expected workout_sets columns: timestamp, exercise, reps, weight_kg, is_warmup
     Expected recovery_daily columns: date, sleep_hours, calories_kcal, protein_g, carbs_g,
     optional resting_hr_bpm, bodyweight_kg
+
+    Pass ``_recovery_already_imputed=True`` when the caller has already run
+    ``impute_bad_recovery`` to avoid the log message printing twice.
     """
     df = workout_sets.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -358,7 +368,7 @@ def build_session_features(
     )
     sessions = _add_global_schedule_features(sessions)
 
-    recovery = _recovery_for_preworkout(recovery_daily)
+    recovery = _recovery_for_preworkout(recovery_daily, already_imputed=_recovery_already_imputed)
     sessions = sessions.merge(
         recovery,
         left_on="session_date",
@@ -366,6 +376,163 @@ def build_session_features(
         how="left",
     )
     return sessions
+
+
+def build_today_row(
+    exercise: str,
+    workout_sets: pd.DataFrame,
+    recovery_daily: pd.DataFrame,
+    today: pd.Timestamp | None = None,
+) -> pd.Series:
+    """Build a synthetic pre-workout feature row for *today* without a logged session.
+
+    Uses:
+    - Today's date (or ``today`` override) as ``session_date``
+    - Last night's recovery metrics from ``recovery_daily``
+    - Load history (ACWR, trailing volume, days_since_last_session) computed from
+      ``workout_sets`` up to but not including today
+    - Exercise identity (muscle_group, split) carried from the most recent logged session
+
+    The resulting row has all model input features but no target columns
+    (``top_set_e1rm_kg``, ``performance_delta_kg``) — it is safe to pass directly
+    to ``ReadinessPredictor.predict_row()``.
+    """
+    today_ts = pd.Timestamp(today or pd.Timestamp.now().normalize())
+    today_date = today_ts.date()
+
+    # ── 1. Pre-impute recovery once — reused for both session features and today ──
+    recovery_imputed = impute_bad_recovery(recovery_daily)
+
+    # ── 2. Build full historical feature matrix up to (not including) today ──────
+    features = build_session_features(workout_sets, recovery_imputed, _recovery_already_imputed=True)
+
+    # ── 3. Find the most recent logged session for this exercise ─────────────────
+    ex_rows = features[features["exercise"] == exercise].copy()
+    if ex_rows.empty:
+        # Try partial match (same logic as _resolve_exercise in predict.py)
+        names = features["exercise"].astype(str).unique()
+        matches = [n for n in names if exercise.lower() in n.lower()]
+        if len(matches) == 1:
+            exercise = matches[0]
+            ex_rows = features[features["exercise"] == exercise].copy()
+        elif len(matches) > 1:
+            raise ValueError(f"Ambiguous exercise {exercise!r}; matches: {matches[:5]}")
+        else:
+            raise ValueError(f"Exercise {exercise!r} not found in history")
+
+    ex_rows["_sd"] = pd.to_datetime(ex_rows["session_date"])
+    last_session = ex_rows.sort_values("_sd").iloc[-1]
+    last_session_date = pd.to_datetime(last_session["session_date"]).date()
+
+    # ── 4. Extract today's recovery values from the already-imputed frame ────────
+    recovery_df = _recovery_for_preworkout(recovery_imputed, already_imputed=True)
+    # _recovery_for_preworkout shifts values by 1 day, so the row keyed to
+    # today_date contains last night's sleep_lag_1d, resting_hr_lag_1d, etc.
+    recovery_df["date"] = pd.to_datetime(recovery_df["date"]).dt.date
+    today_recovery = recovery_df[recovery_df["date"] == today_date]
+
+    if today_recovery.empty:
+        # Fall back to most recent available recovery row
+        today_recovery = recovery_df.sort_values("date").iloc[[-1]]
+
+    rec_row = today_recovery.iloc[0]
+
+    # ── 4. Compute today's load features from the session history ────────────────
+    # Use all_sessions (any exercise) to compute global schedule features
+    all_sessions = features.copy()
+    all_sessions["_sd"] = pd.to_datetime(all_sessions["session_date"])
+
+    # ACWR for this exercise up to today
+    ex_hist = ex_rows.sort_values("_sd")
+    ex_vol_7d = ex_hist[
+        ex_hist["_sd"] >= (today_ts - pd.Timedelta(days=7))
+    ]["volume_load_kg"].sum()
+    ex_vol_28d = ex_hist[
+        ex_hist["_sd"] >= (today_ts - pd.Timedelta(days=28))
+    ]["volume_load_kg"].sum()
+    chronic = ex_vol_28d / 4.0
+    acwr = (ex_vol_7d / chronic) if chronic > 0 else np.nan
+
+    days_since_last = (today_ts - pd.to_datetime(last_session_date)).days
+
+    # Global schedule: distinct workout days in past 7 days
+    past_7_start = today_ts - pd.Timedelta(days=7)
+    training_days_7d = (
+        all_sessions[all_sessions["_sd"] >= past_7_start]["_sd"]
+        .dt.normalize()
+        .nunique()
+    )
+
+    last_any_session = all_sessions["_sd"].max()
+    days_since_last_workout = (today_ts - last_any_session).days if pd.notna(last_any_session) else np.nan
+
+    # Per-muscle / per-split trailing frequency
+    muscle = str(last_session.get("muscle_group", "unknown"))
+    split = str(last_session.get("split", "unknown"))
+
+    past_10_start = today_ts - pd.Timedelta(days=10)
+    muscle_sessions_10d = int(
+        all_sessions[
+            (all_sessions["_sd"] >= past_10_start) & (all_sessions["muscle_group"] == muscle)
+        ]["_sd"].dt.normalize().nunique()
+    )
+    split_sessions_10d = int(
+        all_sessions[
+            (all_sessions["_sd"] >= past_10_start) & (all_sessions["split"] == split)
+        ]["_sd"].dt.normalize().nunique()
+    )
+
+    # Weekly deload flag: last complete week volume vs prior 4-week mean
+    this_week_start = today_ts - pd.Timedelta(days=today_ts.dayofweek)
+    prev_week_vol = ex_hist[
+        (ex_hist["_sd"] >= this_week_start - pd.Timedelta(weeks=1))
+        & (ex_hist["_sd"] < this_week_start)
+    ]["volume_load_kg"].sum()
+    four_week_mean = ex_hist[
+        ex_hist["_sd"] >= (today_ts - pd.Timedelta(weeks=4))
+    ]["volume_load_kg"].mean()
+    deload_flag = int(
+        pd.notna(four_week_mean)
+        and four_week_mean > 0
+        and prev_week_vol < DELOAD_VOLUME_RATIO * four_week_mean
+    )
+
+    # ── 5. Assemble the synthetic row ────────────────────────────────────────────
+    row: dict = {
+        "exercise": exercise,
+        "session_date": today_date,
+        "muscle_group": muscle,
+        "split": split,
+        # Load features
+        "volume_load_kg": 0.0,          # not yet performed
+        "volume_load_all_kg": 0.0,
+        "n_working_sets": 0,
+        "n_sets_all": 0,
+        "volume_trailing_7d": float(ex_vol_7d),
+        "volume_trailing_28d": float(ex_vol_28d),
+        "acwr": float(acwr) if pd.notna(acwr) else np.nan,
+        "days_since_last_session": float(days_since_last),
+        "days_since_last_workout": float(days_since_last_workout),
+        "training_days_trailing_7d": float(training_days_7d),
+        "muscle_group_sessions_trailing_10d": float(muscle_sessions_10d),
+        "split_sessions_trailing_10d": float(split_sessions_10d),
+        "deload_flag": deload_flag,
+        "day_of_week": today_ts.dayofweek,
+        "continuity_break": 0,
+    }
+
+    # Carry in all recovery columns available for today
+    for col in rec_row.index:
+        if col not in ("date",):
+            row[col] = rec_row[col]
+
+    # Carry forward exercise-level history columns from last session
+    for col in ("top_set_e1rm_kg", "max_working_weight_kg", "volume_wow_pct",
+                "weekly_volume", "bodyweight_lag_1d"):
+        if col in last_session.index and col not in row:
+            row[col] = last_session[col]
+
+    return pd.Series(row)
 
 
 def load_features(data_dir: Path) -> pd.DataFrame:

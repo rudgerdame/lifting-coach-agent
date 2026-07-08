@@ -1,4 +1,4 @@
-# One-command demo: synthetic data -> train -> eval report + SHAP plot
+# One-command demo: synthetic data -> train -> FAISS index -> agent eval
 # Usage: .\scripts\run_demo.ps1
 #        .\scripts\run_demo.ps1 -GravityOS   # local personal data (not committed)
 
@@ -28,6 +28,12 @@ if (-not $GravityOS) {
 
     Write-Host "Training on synthetic data..."
     & $Python -m models.train --data-dir data/synthetic
+
+    Write-Host "Building FAISS corpus index..."
+    & $Python -m index.build
+
+    Write-Host "Running agent eval harness..."
+    & $Python -m eval.run_all --data-dir data/synthetic
 } else {
     if (-not $GravityOSDir) {
         throw "Set GRAVITYOS_DATA_DIR or pass -GravityOSDir"
@@ -39,5 +45,9 @@ if (-not $GravityOS) {
 Write-Host ""
 Write-Host "Done. Review:"
 Write-Host "  eval/model_report.md"
-Write-Host "  eval/shap_summary.png"
-Write-Host "  models/artifacts/lgb_readiness.pkl"
+Write-Host "  eval/classification_report.png  (primary: confusion + reliability)"
+Write-Host "  eval/shap_summary_clf.png       (classifier SHAP)"
+Write-Host "  eval/shap_summary.png           (regression SHAP)"
+Write-Host "  eval/results.md"
+Write-Host "  models/artifacts/lgb_readiness_clf.pkl  (primary classifier)"
+Write-Host "  models/artifacts/lgb_readiness.pkl      (regression)"

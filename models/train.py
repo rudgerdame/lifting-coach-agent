@@ -13,15 +13,41 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    log_loss,
+    mean_absolute_error,
+    roc_auc_score,
+)
 
 from features.pipeline import CONTINUITY_DROP_PCT, load_features, load_gravityos_features
-from models.baselines import NaiveAtTrend, NaiveGlobalMean, NaivePerExerciseMean
+from models.baselines import (
+    MajorityClass,
+    NaiveAtTrend,
+    NaiveGlobalMean,
+    NaivePerExerciseMean,
+    PerExerciseMajorityClass,
+)
+from models.labeling import CLASS_NAMES, DEFAULT_K, DeltaClassLabeler
 
 TARGET_COL = "performance_delta"
 CATEGORICAL_COLS = ("exercise", "muscle_group", "split")
 HUBER_ALPHA = 1.0
+
+# Readiness classifier (alongside the regressor): predicts below/at/above trend.
+CLASS_CODES = (0, 1, 2)
+CLF_MODEL_NAME = "lgb_readiness_clf.pkl"
+CLF_META_NAME = "clf_meta.pkl"
+# Probability calibration: 'sigmoid' (Platt, robust for small N) or 'isotonic'.
+# Corrects the over-confident sigmoidal reliability curve so class_probs reflect
+# true frequencies (and class_confidence is trustworthy for the planner's hold rule).
+CLF_CALIBRATION = "sigmoid"
+CLF_CALIBRATION_FOLDS = 3
 
 # Pre-workout features only — no same-day sets, volume, or intensity.
 BASE_FEATURE_COLS = [
@@ -63,7 +89,9 @@ BASE_FEATURE_COLS = [
 ARTIFACTS_DIR = Path("models/artifacts")
 REPORT_PATH = Path("eval/model_report.md")
 SHAP_PATH = Path("eval/shap_summary.png")
+SHAP_CLF_PATH = Path("eval/shap_summary_clf.png")
 CALIBRATION_PATH = Path("eval/calibration_plot.png")
+CLASSIFICATION_PATH = Path("eval/classification_report.png")
 UNIVARIATE_PLOTS_PATH = Path("eval/feature_univariate_plots.png")
 SYNTHETIC_META_PATH = Path("data/synthetic/meta.json")
 UNIVARIATE_TOP_N = 8
@@ -74,6 +102,8 @@ CALIBRATION_AXIS_BUFFER_KG = 1.0
 
 DEFAULT_N_FOLDS = 3
 MIN_TRAIN_FRAC = 0.5
+CALIBRATION_METHOD = "isotonic"
+CALIBRATION_CV = 3
 
 
 @dataclass
@@ -88,6 +118,20 @@ class FoldMetrics:
     naive_mae: float
     global_mean_mae: float
     exercise_mean_mae: float
+
+
+@dataclass
+class ClfFoldMetrics:
+    fold: int
+    n_train: int
+    n_test: int
+    test_start: str
+    test_end: str
+    accuracy: float
+    macro_f1: float
+    log_loss: float
+    majority_accuracy: float
+    exercise_majority_accuracy: float
 
 
 def add_target_delta(df: pd.DataFrame) -> pd.DataFrame:
@@ -402,8 +446,14 @@ def _write_shap_plot(
     shap_values = explainer.shap_values(X)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(10, 6.5))
     shap.summary_plot(shap_values, X, show=False, max_display=min(20, len(feature_cols)))
+    plt.suptitle(
+        "Lifting Coach — Session Readiness Model\n"
+        "SHAP: what drives predicted performance vs. your recent trend",
+        fontsize=11,
+        y=1.02,
+    )
     plt.tight_layout()
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close()
@@ -517,6 +567,277 @@ def _write_univariate_plots(
     return features
 
 
+def _fit_lgbm_clf(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    feature_cols: list[str],
+) -> lgb.LGBMClassifier:
+    model = lgb.LGBMClassifier(
+        objective="multiclass",
+        num_class=len(CLASS_CODES),
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.05,
+        class_weight="balanced",
+        random_state=42,
+        verbose=-1,
+    )
+    model.fit(
+        X_train,
+        y_train,
+        categorical_feature=_categorical_indices(feature_cols),
+    )
+    return model
+
+
+def _fit_calibrated_clf(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    feature_cols: list[str],
+    *,
+    method: str = CLF_CALIBRATION,
+    cv: int = CLF_CALIBRATION_FOLDS,
+) -> CalibratedClassifierCV:
+    """Wrap LightGBM with probability calibration (Platt or isotonic).
+
+    Base model keeps ``class_weight="balanced"`` for rank quality on rare classes;
+    the calibrator remaps scores to true observed frequencies on held-out folds.
+    """
+    base = _fit_lgbm_clf(X_train, y_train, feature_cols)
+    calibrated = CalibratedClassifierCV(base, method=method, cv=cv)
+    calibrated.fit(X_train, y_train)
+    return calibrated
+
+
+def aligned_proba(model, X: pd.DataFrame) -> np.ndarray:
+    """predict_proba aligned to full (0, 1, 2) class order even if a fold misses one."""
+    proba = model.predict_proba(X)
+    out = np.zeros((len(X), len(CLASS_CODES)), dtype=float)
+    for col_idx, cls in enumerate(model.classes_):
+        out[:, int(cls)] = proba[:, col_idx]
+    return out
+
+
+def walk_forward_classify(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    k: float,
+    n_folds: int = DEFAULT_N_FOLDS,
+) -> tuple[list[ClfFoldMetrics], pd.DataFrame]:
+    """Walk-forward CV for the readiness classifier.
+
+    Class labels are fit on each fold's training rows only (no leakage) and
+    applied to that fold's test rows. Returns per-fold metrics plus out-of-fold
+    predictions (true class, predicted class, per-class probabilities).
+    """
+    fold_metrics: list[ClfFoldMetrics] = []
+    oof_parts: list[pd.DataFrame] = []
+
+    for fold, (train_df, test_df) in enumerate(walk_forward_splits(df, n_folds=n_folds), start=1):
+        labeler = DeltaClassLabeler(k=k).fit(train_df)
+        y_train = labeler.transform(train_df)
+        y_test = labeler.transform(test_df)
+
+        X_train = prepare_features(train_df, feature_cols)
+        X_test = prepare_features(test_df, feature_cols)
+
+        clf = _fit_calibrated_clf(X_train, y_train, feature_cols)
+        proba = aligned_proba(clf, X_test)
+        pred = proba.argmax(axis=1)
+
+        majority = MajorityClass().fit(y_train)
+        ex_majority = PerExerciseMajorityClass().fit(train_df, y_train)
+
+        test_dates = pd.to_datetime(test_df["session_date"])
+        fold_metrics.append(
+            ClfFoldMetrics(
+                fold=fold,
+                n_train=len(train_df),
+                n_test=len(test_df),
+                test_start=str(test_dates.min().date()),
+                test_end=str(test_dates.max().date()),
+                accuracy=float(accuracy_score(y_test, pred)),
+                macro_f1=float(f1_score(y_test, pred, labels=CLASS_CODES, average="macro", zero_division=0)),
+                log_loss=float(log_loss(y_test, proba, labels=list(CLASS_CODES))),
+                majority_accuracy=float(accuracy_score(y_test, majority.predict(len(test_df)))),
+                exercise_majority_accuracy=float(accuracy_score(y_test, ex_majority.predict(test_df))),
+            )
+        )
+
+        oof_parts.append(
+            pd.DataFrame(
+                {
+                    "y_true": y_test,
+                    "y_pred": pred,
+                    "p_below": proba[:, 0],
+                    "p_at": proba[:, 1],
+                    "p_above": proba[:, 2],
+                    "fold": fold,
+                },
+                index=test_df.index,
+            )
+        )
+
+    oof = pd.concat(oof_parts) if oof_parts else pd.DataFrame()
+    return fold_metrics, oof
+
+
+def _clf_oof_stats(oof: pd.DataFrame) -> dict[str, object]:
+    y_true = oof["y_true"].to_numpy()
+    y_pred = oof["y_pred"].to_numpy()
+    proba = oof[["p_below", "p_at", "p_above"]].to_numpy()
+
+    cm = confusion_matrix(y_true, y_pred, labels=list(CLASS_CODES))
+    per_class_f1 = f1_score(y_true, y_pred, labels=CLASS_CODES, average=None, zero_division=0)
+    per_class_recall = (cm.diagonal() / cm.sum(axis=1, where=cm.sum(axis=1) > 0)) if cm.sum() else np.zeros(3)
+    support = cm.sum(axis=1)
+
+    try:
+        macro_auc = float(
+            roc_auc_score(y_true, proba, multi_class="ovr", average="macro", labels=list(CLASS_CODES))
+        )
+    except ValueError:
+        macro_auc = float("nan")
+
+    per_class_auc = np.full(len(CLASS_CODES), np.nan)
+    for c in CLASS_CODES:
+        y_bin = (y_true == c).astype(int)
+        if y_bin.min() == y_bin.max():  # only one class present → AUC undefined
+            continue
+        per_class_auc[c] = float(roc_auc_score(y_bin, proba[:, c]))
+
+    return {
+        "n": int(len(oof)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, labels=CLASS_CODES, average="macro", zero_division=0)),
+        "log_loss": float(log_loss(y_true, proba, labels=list(CLASS_CODES))),
+        "macro_auc": macro_auc,
+        "per_class_auc": per_class_auc,
+        "confusion": cm,
+        "per_class_f1": per_class_f1,
+        "per_class_recall": np.asarray(per_class_recall, dtype=float),
+        "support": support,
+    }
+
+
+def _reliability_curve(p: np.ndarray, hit: np.ndarray, *, n_bins: int = 8) -> tuple[np.ndarray, np.ndarray]:
+    """Mean predicted prob vs observed frequency, equal-count bins."""
+    if len(p) < n_bins:
+        return np.array([]), np.array([])
+    try:
+        labels = pd.Series(pd.qcut(p, q=n_bins, duplicates="drop"))
+    except ValueError:
+        return np.array([]), np.array([])
+    centers, freqs = [], []
+    for interval in labels.cat.categories:
+        mask = (labels == interval).to_numpy()
+        if mask.sum() == 0:
+            continue
+        centers.append(float(p[mask].mean()))
+        freqs.append(float(hit[mask].mean()))
+    return np.array(centers), np.array(freqs)
+
+
+def _write_classification_plot(oof: pd.DataFrame, stats: dict[str, object], out_path: Path) -> None:
+    cm = np.asarray(stats["confusion"], dtype=float)
+    cm_norm = np.divide(cm, cm.sum(axis=1, keepdims=True), out=np.zeros_like(cm), where=cm.sum(axis=1, keepdims=True) > 0)
+
+    fig, (ax_cm, ax_rel) = plt.subplots(1, 2, figsize=(13, 5.5))
+
+    im = ax_cm.imshow(cm_norm, cmap="Blues", vmin=0, vmax=1)
+    ax_cm.set_xticks(range(len(CLASS_NAMES)))
+    ax_cm.set_yticks(range(len(CLASS_NAMES)))
+    ax_cm.set_xticklabels(CLASS_NAMES, rotation=20, ha="right", fontsize=8)
+    ax_cm.set_yticklabels(CLASS_NAMES, fontsize=8)
+    ax_cm.set_xlabel("Predicted")
+    ax_cm.set_ylabel("Actual")
+    ax_cm.set_title(f"OOF confusion (row-normalized)\nacc={stats['accuracy']:.2f}  macro-F1={stats['macro_f1']:.2f}")
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax_cm.text(
+                j,
+                i,
+                f"{cm_norm[i, j]:.2f}\n(n={int(cm[i, j])})",
+                ha="center",
+                va="center",
+                color="white" if cm_norm[i, j] > 0.5 else "black",
+                fontsize=8,
+            )
+    fig.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
+
+    ax_rel.plot([0, 1], [0, 1], "k--", linewidth=1, label="Perfect calibration")
+    proba_cols = oof[["p_below", "p_at", "p_above"]].to_numpy()
+    for code, name, color in (
+        (0, "below_trend", "#ef8a62"),
+        (1, "at_trend", "#7f7f7f"),
+        (2, "above_trend", "#2166ac"),
+    ):
+        p = proba_cols[:, code]
+        hit = (oof["y_true"].to_numpy() == code).astype(float)
+        cx, cy = _reliability_curve(p, hit, n_bins=10)
+        if len(cx):
+            ax_rel.plot(cx, cy, marker="o", markersize=4, color=color, linewidth=1.5, label=f"P({name})")
+    ax_rel.set_xlim(0, 1)
+    ax_rel.set_ylim(0, 1)
+    ax_rel.set_aspect("equal", adjustable="box")
+    ax_rel.set_xlabel("Mean predicted probability (decile bins)")
+    ax_rel.set_ylabel("Observed frequency")
+    ax_rel.set_title(f"Reliability (OOF, {CLF_CALIBRATION}-calibrated) — all classes, deciles")
+    ax_rel.legend(loc="upper left", fontsize=8)
+    ax_rel.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        f"Readiness classifier — walk-forward OOF (n={stats['n']}, macro-AUC={stats['macro_auc']:.2f})",
+        fontsize=11,
+        y=1.02,
+    )
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _write_clf_shap_plot(
+    model: lgb.LGBMClassifier,
+    X: pd.DataFrame,
+    feature_cols: list[str],
+    out_path: Path,
+) -> list[tuple[str, float]]:
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
+
+    # LightGBM multiclass returns a list (per class) or a 3-D array depending on version.
+    if isinstance(shap_values, list):
+        per_class_abs = [np.abs(sv).mean(axis=0) for sv in shap_values]
+    else:
+        arr = np.asarray(shap_values)
+        per_class_abs = [np.abs(arr[..., c]).mean(axis=0) for c in range(arr.shape[-1])]
+    mean_abs = np.mean(per_class_abs, axis=0)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(10, 6.5))
+    shap.summary_plot(
+        shap_values,
+        X,
+        plot_type="bar",
+        class_names=list(CLASS_NAMES),
+        max_display=min(20, len(feature_cols)),
+        show=False,
+    )
+    plt.suptitle(
+        "Lifting Coach — Readiness Classifier\n"
+        "SHAP: features driving below/at/above-trend probability",
+        fontsize=11,
+        y=1.02,
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close()
+
+    return sorted(zip(feature_cols, mean_abs), key=lambda x: x[1], reverse=True)
+
+
 def _synthetic_data_label(data_dir: Path) -> str:
     return f"Synthetic demo ({data_dir.as_posix()})"
 
@@ -525,6 +846,7 @@ def train(
     data_dir: Path | None = None,
     gravityos_dir: Path | None = None,
     n_folds: int = DEFAULT_N_FOLDS,
+    class_k: float = DEFAULT_K,
 ) -> None:
     if gravityos_dir is not None:
         df = load_gravityos_features(gravityos_dir)
@@ -557,6 +879,19 @@ def train(
     shap_ranked = _write_shap_plot(lgbm, X_shap, feature_cols, SHAP_PATH)
     univariate_features = _write_univariate_plots(df, oof, shap_ranked, UNIVARIATE_PLOTS_PATH)
 
+    # --- Readiness classifier (alongside the regressor) -----------------------
+    clf_fold_metrics, clf_oof = walk_forward_classify(df, feature_cols, k=class_k, n_folds=n_folds)
+    clf_stats = _clf_oof_stats(clf_oof)
+    _write_classification_plot(clf_oof, clf_stats, CLASSIFICATION_PATH)
+
+    # Final deployment classifier + label thresholds fit on all training rows.
+    final_labeler = DeltaClassLabeler(k=class_k).fit(df)
+    y_class_all = final_labeler.transform(df)
+    clf_base = _fit_lgbm_clf(X_all, y_class_all, feature_cols)
+    clf = _fit_calibrated_clf(X_all, y_class_all, feature_cols)
+    clf_shap_ranked = _write_clf_shap_plot(clf_base, X_shap, feature_cols, SHAP_CLF_PATH)
+    class_balance = {CLASS_NAMES[c]: int((y_class_all == c).sum()) for c in CLASS_CODES}
+
     last_fold = cv_metrics[-1]
     linear, linear_cols = _fit_linear(prepare_features(last_train, feature_cols), last_train[TARGET_COL])
     linear_mae = mean_absolute_error(
@@ -588,6 +923,26 @@ def train(
         ARTIFACTS_DIR / "model_meta.pkl",
     )
 
+    joblib.dump(clf, ARTIFACTS_DIR / CLF_MODEL_NAME)
+    joblib.dump(
+        {
+            "feature_cols": feature_cols,
+            "categorical_cols": list(CATEGORICAL_COLS),
+            "objective": "multiclass",
+            "class_names": list(CLASS_NAMES),
+            "class_codes": list(CLASS_CODES),
+            "label_k": class_k,
+            "label_min_obs": final_labeler.min_obs,
+            "global_delta_std": round(final_labeler.global_std_, 4),
+            "exercise_band_halfwidth_kg": final_labeler.thresholds_summary(),
+            "class_balance": class_balance,
+            "calibration_method": CLF_CALIBRATION,
+            "calibration_folds": CLF_CALIBRATION_FOLDS,
+            "scoring_mode": "pre_workout",
+        },
+        ARTIFACTS_DIR / CLF_META_NAME,
+    )
+
     report = _build_report(
         data_label=data_label,
         cv_metrics=cv_metrics,
@@ -603,18 +958,32 @@ def train(
         univariate_features=univariate_features,
         n_folds=n_folds,
         cal_stats=cal_stats,
+        clf_fold_metrics=clf_fold_metrics,
+        clf_stats=clf_stats,
+        clf_shap_ranked=clf_shap_ranked,
+        class_balance=class_balance,
+        class_k=class_k,
+        global_delta_std=final_labeler.global_std_,
     )
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"Wrote {REPORT_PATH}")
     print(f"Wrote {SHAP_PATH}")
+    print(f"Wrote {SHAP_CLF_PATH}")
     print(f"Wrote {CALIBRATION_PATH}")
+    print(f"Wrote {CLASSIFICATION_PATH}")
     print(f"Wrote {UNIVARIATE_PLOTS_PATH}")
     print(f"Continuity exclusions: {n_continuity_excluded} exercise-sessions (>{CONTINUITY_DROP_PCT:.0%} weight drop)")
     print(f"Training rows: {len(df)} (from {n_sessions_raw} raw)")
     print(
         f"Walk-forward LightGBM MAE: "
         f"{np.mean([m.lgb_mae for m in cv_metrics]):.2f} ± {np.std([m.lgb_mae for m in cv_metrics]):.2f}"
+    )
+    print(
+        f"Walk-forward classifier OOF accuracy: {clf_stats['accuracy']:.3f} "
+        f"(macro-F1 {clf_stats['macro_f1']:.3f}, vs majority "
+        f"{np.mean([m.majority_accuracy for m in clf_fold_metrics]):.3f}); "
+        f"class balance {class_balance}"
     )
 
 
@@ -633,6 +1002,12 @@ def _build_report(
     univariate_features: list[str],
     n_folds: int,
     cal_stats: dict[str, float],
+    clf_fold_metrics: list[ClfFoldMetrics],
+    clf_stats: dict[str, object],
+    clf_shap_ranked: list[tuple[str, float]],
+    class_balance: dict[str, int],
+    class_k: float,
+    global_delta_std: float,
 ) -> str:
     shap_lines = "\n".join(
         f"| {name} | {score:.3f} |" for name, score in shap_ranked[:12]
@@ -647,6 +1022,17 @@ def _build_report(
     naive_mean = np.mean([m.naive_mae for m in cv_metrics])
     global_mean = np.mean([m.global_mean_mae for m in cv_metrics])
     exercise_mean = np.mean([m.exercise_mean_mae for m in cv_metrics])
+
+    clf_section = _build_clf_section(
+        clf_fold_metrics=clf_fold_metrics,
+        clf_stats=clf_stats,
+        clf_shap_ranked=clf_shap_ranked,
+        class_balance=class_balance,
+        class_k=class_k,
+        global_delta_std=global_delta_std,
+        n_folds=n_folds,
+    )
+
     is_synthetic = "synthetic" in data_label.lower()
     if is_synthetic:
         data_caveat = (
@@ -659,15 +1045,26 @@ def _build_report(
 
 > Auto-generated by `python -m models.train`. Re-run after feature or data changes.
 
+The **primary** model is a readiness **classifier** (below/at/above trend). A secondary
+regression head predicts the `performance_delta` magnitude (kg) and is the source of the
+class labels. The classifier section comes first; the regression detail follows.
+
 ## Validation
 
 - **Data source:** {data_label}
 - **Split:** expanding-window walk-forward ({n_folds} folds, min {MIN_TRAIN_FRAC:.0%} of timeline for first train window)
-- **Target:** `performance_delta` (kg) — top-set e1RM minus prior-3-**same-exercise**-session rolling mean (not vs last session alone)
-- **Model:** LightGBM (Huber loss, α={HUBER_ALPHA}) — **pre-workout features only** (no same-day sets/volume/intensity); categorical `exercise`, `muscle_group`, `split`
-- **Evaluation policy:** MAE and calibration use raw model predictions (no post-processing).
+- **Primary target:** readiness **class** — `below_trend` / `at_trend` / `above_trend`, adaptive per-exercise boundary (±{class_k:g}·std of that lift's delta)
+- **Secondary target:** `performance_delta` (kg) — top-set e1RM minus prior-3-**same-exercise**-session rolling mean (not vs last session alone)
+- **Features:** **pre-workout only** (no same-day sets/volume/intensity); categorical `exercise`, `muscle_group`, `split`
+- **Models:** LightGBM multiclass (classifier) + LightGBM Huber (α={HUBER_ALPHA}, regression)
+- **Evaluation policy:** all metrics use raw walk-forward OOF predictions (no post-processing).
 - **Continuity filter:** exclude exercise-sessions with max working weight drop > {CONTINUITY_DROP_PCT:.0%} vs prior same-exercise log ({n_continuity_excluded} excluded, {n_sessions_raw} raw rows)
 - **Training rows:** {n_total} (after continuity filter + feature completeness)
+
+{clf_section}
+---
+
+# Secondary: `performance_delta` magnitude regression
 
 ## Walk-forward CV — MAE on performance_delta (kg)
 
@@ -722,9 +1119,99 @@ Top-{len(univariate_features)} numeric SHAP features: {", ".join(f"`{f}`" for f 
 
 {data_caveat}- Exercise-sessions flagged `continuity_break` (likely equipment/gym change) are excluded from train/eval; e1RM trend resets per segment.
 - Correlation ≠ causation for sleep/calorie/macro features.
-- Walk-forward LightGBM modestly beats naive-at-trend on this demo set; last fold can be near parity.
+- The classifier beats majority/per-exercise-majority baselines on OOF accuracy and macro-F1; the secondary kg regression only modestly beats naive-at-trend (which is why direction, not magnitude, is the headline).
+- **`below_trend` recall is low** (~8–42% depending on calibration): most genuinely below-trend sessions are predicted `at_trend`. This is accepted — planning a normal session on a slightly off day is a minor outcome. When the model *does* predict `below_trend` it is high-precision (>60%), so treat it as a meaningful signal.
+- Class labels (and thus boundaries) are fit on training rows only within each fold — no leakage of the held-out window.
 - Random splits would inflate metrics — walk-forward only.
-- Final artifact is fit on **all** data after CV evaluation.
+- Final artifacts are fit on **all** data after CV evaluation.
+"""
+
+
+def _build_clf_section(
+    *,
+    clf_fold_metrics: list[ClfFoldMetrics],
+    clf_stats: dict[str, object],
+    clf_shap_ranked: list[tuple[str, float]],
+    class_balance: dict[str, int],
+    class_k: float,
+    global_delta_std: float,
+    n_folds: int,
+) -> str:
+    cm = np.asarray(clf_stats["confusion"], dtype=float)
+    col_sums = cm.sum(axis=0)
+    precision = np.divide(cm.diagonal(), col_sums, out=np.zeros(len(CLASS_CODES)), where=col_sums > 0)
+    recall = np.asarray(clf_stats["per_class_recall"], dtype=float)
+    f1 = np.asarray(clf_stats["per_class_f1"], dtype=float)
+    support = np.asarray(clf_stats["support"], dtype=int)
+    per_class_auc = np.asarray(clf_stats["per_class_auc"], dtype=float)
+
+    fold_lines = "\n".join(
+        f"| {m.fold} | {m.test_start} → {m.test_end} | {m.n_train} | {m.n_test} | "
+        f"{m.accuracy:.3f} | {m.macro_f1:.3f} | {m.log_loss:.3f} | "
+        f"{m.majority_accuracy:.3f} | {m.exercise_majority_accuracy:.3f} |"
+        for m in clf_fold_metrics
+    )
+    per_class_lines = "\n".join(
+        f"| {CLASS_NAMES[c]} | {precision[c]:.3f} | {recall[c]:.3f} | {f1[c]:.3f} | "
+        f"{'n/a' if per_class_auc[c] != per_class_auc[c] else f'{per_class_auc[c]:.3f}'} | {support[c]} |"
+        for c in CLASS_CODES
+    )
+    shap_lines = "\n".join(f"| {name} | {score:.3f} |" for name, score in clf_shap_ranked[:12])
+    balance_str = ", ".join(f"{k}={v}" for k, v in class_balance.items())
+    mean_majority = np.mean([m.majority_accuracy for m in clf_fold_metrics])
+    mean_ex_majority = np.mean([m.exercise_majority_accuracy for m in clf_fold_metrics])
+    macro_auc = clf_stats["macro_auc"]
+    macro_auc_str = "n/a" if macro_auc != macro_auc else f"{macro_auc:.3f}"  # NaN check
+
+    return f"""# Primary: readiness classifier
+
+Predicts the **direction** of today's lift vs your recent trend — three ordinal classes:
+`below_trend` / `at_trend` / `above_trend`. This is the headline model the agent and
+planner consume; the kg delta below is a secondary magnitude estimate.
+
+- **Labels:** derived from the same `performance_delta`. Boundaries are **adaptive per
+  exercise**: `at_trend` = `|delta| < {class_k:g} · std(delta_exercise)`; below/above
+  outside that band. Exercises with too few sessions fall back to the global
+  std ({global_delta_std:.2f} kg). Thresholds are fit on **training rows only** per fold.
+- **Model:** LightGBM multiclass (softmax, `class_weight="balanced"`) + **{CLF_CALIBRATION} calibration**
+  ({CLF_CALIBRATION_FOLDS}-fold on train data per walk-forward fold). Balanced weights preserve
+  rank on rare classes; calibration remaps scores to true frequencies for honest `class_probs`.
+- **Class balance (full training set):** {balance_str}
+- **Rationale:** the kg regressor only modestly beats naive (see MAE above); the
+  decision the coach actually consumes is directional, and calibrated class
+  probabilities express uncertainty better than a single point estimate.
+
+### Walk-forward CV — classification
+
+| Fold | Test period | Train n | Test n | Accuracy | Macro-F1 | Log loss | Majority acc | Per-exercise majority acc |
+|------|-------------|---------|--------|----------|----------|----------|--------------|---------------------------|
+{fold_lines}
+
+**OOF accuracy:** {clf_stats['accuracy']:.3f}  (majority baseline {mean_majority:.3f}, per-exercise majority {mean_ex_majority:.3f})  
+**OOF macro-F1:** {clf_stats['macro_f1']:.3f}  |  **OOF log loss:** {clf_stats['log_loss']:.3f}  |  **OOF macro AUC (OvR):** {macro_auc_str}
+
+### Per-class (walk-forward OOF)
+
+| Class | Precision | Recall | F1 | ROC AUC (OvR) | Support |
+|-------|-----------|--------|----|---------------|---------|
+{per_class_lines}
+
+### Confusion matrix & calibration
+
+![Classification report](classification_report.png)
+
+Left: row-normalized OOF confusion matrix. Right: reliability curves for
+`below_trend` and `above_trend` predicted probabilities (points near the diagonal
+= well-calibrated probabilities).
+
+### SHAP — classifier (mean |contribution| across classes, last fold)
+
+![Classifier SHAP summary](shap_summary_clf.png)
+
+| Feature | mean \\|SHAP\\| |
+|---------|-------------|
+{shap_lines}
+
 """
 
 
@@ -734,13 +1221,19 @@ def main() -> None:
     parser.add_argument("--gravityos", action="store_true")
     parser.add_argument("--gravityos-dir", type=Path, default=None)
     parser.add_argument("--folds", type=int, default=DEFAULT_N_FOLDS)
+    parser.add_argument(
+        "--class-k",
+        type=float,
+        default=DEFAULT_K,
+        help="Adaptive class band half-width in std units (at_trend = |delta| < k*std)",
+    )
     args = parser.parse_args()
 
     if args.gravityos:
         gravityos_dir = args.gravityos_dir or Path(os.environ["GRAVITYOS_DATA_DIR"])
-        train(gravityos_dir=gravityos_dir, n_folds=args.folds)
+        train(gravityos_dir=gravityos_dir, n_folds=args.folds, class_k=args.class_k)
     else:
-        train(data_dir=args.data_dir, n_folds=args.folds)
+        train(data_dir=args.data_dir, n_folds=args.folds, class_k=args.class_k)
 
 
 if __name__ == "__main__":

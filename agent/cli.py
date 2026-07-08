@@ -15,7 +15,7 @@ from agent.cursor_client import ask_cursor, cursor_endpoint_summary
 from agent.graph import build_agent
 from agent.llm import check_llm_connection, llm_endpoint_summary
 from agent.prompts import SYSTEM_PROMPT
-from agent.tools import make_tools
+from agent.router import tools_only_answer
 from index.retrieve import CorpusRetriever
 
 
@@ -26,7 +26,7 @@ def _llm_provider() -> str:
 
 def _cursor_answer(ctx: CoachContext, retriever: CorpusRetriever | None, question: str) -> str:
     """Tools first, then Cursor SDK synthesizes a cited coaching answer."""
-    tool_output = _tools_only_answer(ctx, retriever, question)
+    tool_output = tools_only_answer(ctx, retriever, question)
     prompt = f"""{SYSTEM_PROMPT}
 
 User question: {question}
@@ -46,27 +46,6 @@ def _print_response(result: dict) -> None:
     last = messages[-1]
     content = getattr(last, "content", str(last))
     print(content)
-
-
-def _tools_only_answer(ctx: CoachContext, retriever: CorpusRetriever | None, question: str) -> str:
-    """Keyword router for demos when no LLM is available."""
-    tools = {t.name: t for t in make_tools(ctx, retriever)}
-    q = question.lower()
-    if any(w in q for w in ("plan", "workout", "train next", "what should i")):
-        return tools["plan_workout"].invoke({"split": None})
-    if any(w in q for w in ("ready", "readiness", "heavy", "performance")):
-        exercise = "bench" if "bench" in q else "squat" if "squat" in q else "Incline Bench"
-        return tools["predict_readiness"].invoke({"exercise": exercise, "session_date": None})
-    if any(w in q for w in ("history", "last", "logged", "when did")):
-        exercise = "Incline Bench" if "bench" in q else None
-        return tools["query_history"].invoke({"exercise": exercise, "split": None, "last_n_sessions": 5})
-    if any(w in q for w in ("volume", "deload", "sleep", "protein", "hypertrophy")):
-        return tools["search_corpus"].invoke({"query": question, "k": 3})
-    if "block" in q or "week" in q:
-        return tools["plan_block"].invoke({"weeks": 4})
-    if "explain" in q or "why" in q:
-        return tools["explain"].invoke({"topic": question})
-    return tools["plan_workout"].invoke({"split": None})
 
 
 def main() -> None:
@@ -110,7 +89,7 @@ def main() -> None:
         if not args.question:
             print("--tools-only requires a question argument", file=sys.stderr)
             raise SystemExit(1)
-        print(_tools_only_answer(ctx, retriever, args.question))
+        print(tools_only_answer(ctx, retriever, args.question))
         return
 
     if _llm_provider() == "cursor":

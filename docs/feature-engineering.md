@@ -23,6 +23,11 @@ Same-day features (`intensity_pct`, session volume, set counts) are **not** mode
 
 ## Target variable
 
+The system has **two heads** sharing the same pre-workout features:
+
+1. **Primary — readiness class** (`below_trend` / `at_trend` / `above_trend`): the headline output the agent and planner consume. Defined in [Readiness class](#readiness-class-classification-target-primary) below.
+2. **Secondary — `performance_delta` (kg)**: the continuous magnitude estimate, and the quantity the class labels are derived from. Defined first because the class boundaries reference it.
+
 ### `performance_delta` (kg)
 
 **Definition**
@@ -49,7 +54,7 @@ Where:
 | Session-level, per exercise | Matches how a lifter experiences a workout ("squat felt strong today") and avoids pooling incompatible lifts |
 | Delta vs trend, not raw e1RM | Raw e1RM drifts with training age and program phase. The model should predict **deviation from your recent baseline**, not absolute strength |
 | 3-session trend window | Short enough to track mesocycle progress; long enough to smooth one bad/good set. Standard "recent form" horizon for autoregulation |
-| Regression on kg delta | Continuous and interpretable ("+4 kg vs trend"). Can be bucketed later into over / at / under for classification |
+| Regression on kg delta (secondary) | Continuous and interpretable ("+4 kg vs trend"), and it supplies the labels for the primary classifier (over / at / under) |
 
 **Limitations (disclose in review)**
 
@@ -57,6 +62,49 @@ Where:
 - Exercise swaps and technique changes break trend continuity
 - Accessory lifts have noisier e1RM estimates than compounds
 - No RPE — objective proxies only
+
+---
+
+### Readiness class (classification target, primary)
+
+**Definition**
+
+The same `performance_delta` is bucketed into three **ordinal** classes that map directly
+to the coaching `band`:
+
+```
+at_trend     if |performance_delta| <  k · std(performance_delta_exercise)
+below_trend  if  performance_delta  ≤ −k · std(performance_delta_exercise)
+above_trend  if  performance_delta  ≥  k · std(performance_delta_exercise)
+```
+
+with `k = 0.5` by default (tune via `python -m models.train --class-k`).
+
+**Adaptive per-exercise thresholds:** the band half-width scales with each exercise's own
+delta std, so `below_trend` means the same thing (in std units) for a 200 kg deadlift as
+for a 12 kg lateral raise. Exercises with fewer than 6 logged sessions fall back to the
+**global** delta std. Thresholds are **fit on training rows only** within each
+walk-forward fold (and on all data for the deployed model), so the label boundary never
+leaks the held-out window. The fitted per-exercise half-widths are stored in
+`models/artifacts/clf_meta.pkl`.
+
+**Why classify in addition to regress**
+
+| Choice | Rationale |
+|--------|-----------|
+| Direction over exact kg | The kg regressor only modestly beats naive-at-trend (see `eval/model_report.md`); the learnable, decision-relevant signal is directional |
+| Calibrated probabilities | A classifier expresses uncertainty ("68% above-trend") far better than a single point estimate, and the planner already consumes a `band` |
+| Ordinal 3-class | below < at < above is naturally ordered; reuses the entire pre-workout feature set unchanged |
+| `class_weight="balanced"` | Most sessions land `at_trend`; balancing prevents the majority class from dominating |
+
+**Model:** LightGBM multiclass (softmax). Evaluated with accuracy, macro-F1, log loss,
+macro one-vs-rest AUC, a confusion matrix, and reliability curves — all walk-forward OOF.
+Compared against majority-class and per-exercise-majority baselines.
+
+**Inference:** `ReadinessPredictor` loads the classifier when its artifact is present and
+uses its argmax as the primary `band` (with `class_probs`); it still returns the
+regression `performance_delta_kg` for magnitude. If the classifier artifact is absent it
+falls back to thresholding the regression delta at ±1.5 kg.
 
 ---
 
@@ -490,6 +538,7 @@ calories_deviation = mean(calories last 3 days) − mean(calories last 28 days)
 
 | Date | Change |
 |------|--------|
+| 2026-06-25 | Added readiness classifier (below/at/above trend) with adaptive per-exercise thresholds, alongside the kg regression |
 | 2026-06-13 | Continuity break filter (>20% weight drop per exercise) excludes bad trend rows from train/eval |
 | 2026-06-13 | Pre-workout feature set: drop same-day features, add split, shift trailing load/recovery |
 | 2026-06-13 | Added temporal features, protein/carbs, volume ablation, anomaly imputation doc |

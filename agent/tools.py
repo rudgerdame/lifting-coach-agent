@@ -72,20 +72,37 @@ def make_tools(ctx: CoachContext, retriever: CorpusRetriever | None = None):
         return _json({"sessions": sessions[:20], "citation": "[history]"})
 
     @tool
-    def predict_readiness(exercise: str, session_date: str | None = None) -> str:
+    def predict_readiness(
+        exercise: str,
+        session_date: str | None = None,
+        today: bool = True,
+    ) -> str:
         """
-        Predict performance_delta (kg) vs prior-3-session same-exercise e1RM trend.
-        session_date: YYYY-MM-DD or omit for latest logged session.
+        Predict readiness for an exercise session.
+
+        Default (today=True): scores *today's planned session* using current recovery
+        metrics (last night's sleep, HR, load to date). This is the primary agent path —
+        use it when the user asks "am I ready for X?" or "how will X go today?".
+
+        today=False + session_date: score a specific past session (back-test).
+        today=False + no date: score the most recently logged session (legacy).
+
+        Returns:
+          band: below_trend / at_trend / above_trend
+          performance_delta_kg: predicted kg vs prior-3-session e1RM trend
+          class_probs: per-class probabilities (when classifier is available)
+          key_drivers: top recovery/load features that drove the prediction
         """
         try:
-            result = ctx.predict_readiness(exercise, session_date)
+            result = ctx.predict_readiness(exercise, session_date, today=today)
         except (FileNotFoundError, ValueError) as exc:
             return _json({"error": str(exc)})
 
         payload = asdict(result)
         payload["definition"] = (
-            "performance_delta = top_set_e1rm_kg - mean(prior 3 same-exercise top-set e1RMs); "
-            "not vs last session alone"
+            "band = predicted readiness class (below/at/above trend); "
+            "performance_delta_kg = predicted kg vs mean of prior 3 same-exercise top-set e1RMs. "
+            "session_date='today' means this is a forward-looking prediction, not a historical score."
         )
         payload["citation"] = "[model]"
         return _json(payload)

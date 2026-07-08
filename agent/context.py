@@ -77,11 +77,20 @@ class CoachContext:
     @property
     def recovery_daily(self) -> pd.DataFrame:
         if self._recovery_daily is None:
-            data_dir = self._resolve_data_dir()
-            path = data_dir / "recovery_daily.csv"
-            if not path.exists():
-                raise FileNotFoundError(f"Missing {path}")
-            self._recovery_daily = pd.read_csv(path)
+            if self.data_dir is not None:
+                path = self.data_dir / "recovery_daily.csv"
+                if not path.exists():
+                    raise FileNotFoundError(f"Missing {path}")
+                self._recovery_daily = pd.read_csv(path)
+            elif self.gravityos_dir is not None:
+                from ingestion.loaders import aggregate_apple_health_dir
+
+                health_dir = self.gravityos_dir / "Apple Health Daily"
+                if not health_dir.is_dir():
+                    raise FileNotFoundError(f"Missing Apple Health directory: {health_dir}")
+                self._recovery_daily = aggregate_apple_health_dir(health_dir)
+            else:
+                raise ValueError("Set data_dir or gravityos_dir on CoachContext")
         return self._recovery_daily
 
     @property
@@ -97,5 +106,21 @@ class CoachContext:
         self,
         exercise: str,
         session_date: str | None = None,
+        today: bool = False,
     ):
+        """Predict readiness for an exercise.
+
+        ``today=True`` (default in production): score *today's planned session*
+        using current recovery metrics. This is the primary agent path.
+
+        ``today=False`` + ``session_date``: score a specific past session date.
+        ``today=False`` + no date: score the most recently logged session (legacy,
+        useful for back-testing against known outcomes).
+        """
+        if today:
+            return self.predictor.predict_today(
+                exercise,
+                self.workout_sets,
+                self.recovery_daily,
+            )
         return self.predictor.predict(self.features, exercise, session_date)

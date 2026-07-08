@@ -57,6 +57,10 @@ _DAY_TYPES = [
 ]
 
 _DAYS_DEFAULT = 635
+# Default RNG seed for the committed demo. Chosen via scripts/sweep_synthetic.py as a
+# representative draw of the readiness-signal config (macro OvR AUC ≈ 0.71, near the
+# across-seed mean — not a cherry-picked maximum).
+_SEED_DEFAULT = 17
 _SESSION_HOURS = [9, 10, 14, 15, 17, 18]
 _N_EXERCISES_RANGE = (5, 7)
 _SESSION_SKIP_PROB = 0.11
@@ -66,31 +70,35 @@ _RECOVERY_WARMUP_DAYS = 28
 _SPARSE_FIELD_PROB = 0.18
 _PROGRESSION_SCALE = 1.25
 _PROGRESSION_PER_SESSION = 0.35
-_PR_BUMP_PROB = 0.06
-_PR_BUMP_KG_RANGE = (1.5, 3.0)
+_PR_BUMP_PROB = 0.03
+_PR_BUMP_KG_RANGE = (1.0, 1.8)
 _DELOAD_WEEK_EVERY = 8
-_READINESS_AR = 0.85
-_READINESS_SHOCK_STD = 0.35
+_READINESS_AR = 0.55
+_READINESS_SHOCK_STD = 0.50
 _SLEEP_READINESS_COEF = 0.45
 _RHR_READINESS_COEF = -1.0
 _CALORIES_READINESS_COEF = 65.0
-_SLEEP_LAG1_COEF = 1.4
-_SLEEP_LAG2_COEF = 0.8
-_RHR_TRAIL7_COEF = -0.06
-_VOLUME_TRAIL7_COEF = -0.00035
-_TRAINING_DAYS_COEF = -0.35
-_DAYS_SINCE_WORKOUT_COEF = 0.08
-_RESIDUAL_NOISE_STD = 0.38
+_SLEEP_LAG1_COEF = 2.6
+_SLEEP_LAG2_COEF = 1.1
+_RHR_TRAIL7_COEF = -0.14
+_VOLUME_TRAIL7_COEF = -0.00050
+_TRAINING_DAYS_COEF = -0.50
+_DAYS_SINCE_WORKOUT_COEF = 0.10
+_RESIDUAL_NOISE_STD = 0.08
 _WORKING_SETS = 3
 _WARMUP_REPS = 8
 _WORKING_REP_MIN = 10
-_WORKING_REP_MAX = 17
+_WORKING_REP_MAX = 15
+# Fresh sessions earn a couple more reps on the top set — routes the readiness
+# signal into the e1RM target instead of leaving reps as pure unexplained noise.
+_REP_READINESS_COEF = 1.2
+_REP_PER_SET_NOISE = 0.30
 _WARMUP_WEIGHT_FRAC = 0.65
 
 
 def generate_synthetic(
     days: int = _DAYS_DEFAULT,
-    seed: int = 42,
+    seed: int = _SEED_DEFAULT,
 ) -> tuple[list[WorkoutSet], list[RecoveryDaily]]:
     """Generate synthetic PPL training logs."""
     rng = random.Random(seed)
@@ -216,10 +224,18 @@ def generate_synthetic(
                     exercise_loads[ex_name] += rng.uniform(*_PR_BUMP_KG_RANGE)
                 weight_now = exercise_loads[ex_name] * deload_multiplier
 
+            # Top-set reps drift with readiness (more reps when fresh), clamped
+            # to the working rep band — a second channel for the recovery signal.
+            rep_center = (_WORKING_REP_MIN + _WORKING_REP_MAX) / 2 + _REP_READINESS_COEF * performance_boost
+
             ex_volume_kg = 0.0
             for set_num in range(1, _WORKING_SETS + 2):  # +1 warmup set
                 is_warmup = set_num == 1
-                reps = _WARMUP_REPS if is_warmup else rng.randint(_WORKING_REP_MIN, _WORKING_REP_MAX)
+                if is_warmup:
+                    reps = _WARMUP_REPS
+                else:
+                    reps = int(round(rep_center + rng.gauss(0, _REP_PER_SET_NOISE)))
+                    reps = max(_WORKING_REP_MIN, min(_WORKING_REP_MAX, reps))
                 weight = (
                     weight_now * _WARMUP_WEIGHT_FRAC
                     if is_warmup
@@ -248,7 +264,7 @@ def generate_synthetic(
     return sets, recovery
 
 
-def write_synthetic(out_dir: Path, days: int = _DAYS_DEFAULT, seed: int = 42) -> None:
+def write_synthetic(out_dir: Path, days: int = _DAYS_DEFAULT, seed: int = _SEED_DEFAULT) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     sets, recovery = generate_synthetic(days=days, seed=seed)
 
@@ -274,7 +290,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate synthetic training data")
     parser.add_argument("--out", type=Path, default=Path("data/synthetic"))
     parser.add_argument("--days", type=int, default=_DAYS_DEFAULT)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=_SEED_DEFAULT)
     args = parser.parse_args()
     write_synthetic(args.out, days=args.days, seed=args.seed)
 

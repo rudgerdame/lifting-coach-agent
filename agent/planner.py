@@ -13,6 +13,10 @@ from models.predict import ReadinessPrediction
 PPL_CYCLE = ("push", "pull", "legs")
 LOWER_MUSCLES = frozenset({"quads", "hamstrings", "glutes", "calves"})
 
+# Below this top-class probability the readiness call is treated as uncertain and
+# load changes are held (conservative-by-default, per coaching_policy.md).
+LOW_CONFIDENCE = 0.5
+
 
 @dataclass(frozen=True)
 class ExercisePrescription:
@@ -112,6 +116,7 @@ def _adjust_weight(
     deload: bool,
     acwr_high: bool,
     lower_body: bool,
+    confidence: float | None = None,
 ) -> tuple[float, str]:
     if weight_kg <= 0:
         return weight_kg, "bodyweight or unknown — no load adjustment"
@@ -119,6 +124,13 @@ def _adjust_weight(
     if deload or acwr_high:
         w = round(weight_kg * 0.85, 1)
         return w, "deload/elevated ACWR — reduced ~15% [source: coaching_policy.md]"
+
+    # Conservative-by-default: only act on a directional call we're confident in.
+    if confidence is not None and confidence < LOW_CONFIDENCE and band != "at_trend":
+        return weight_kg, (
+            f"{band} but low confidence ({confidence:.0%}) — hold load "
+            "[source: coaching_policy.md]"
+        )
 
     if band == "below_trend":
         w = round(weight_kg * 0.93, 1)
@@ -152,6 +164,7 @@ def build_workout_plan(
         notes.append(f"No exercises found in history for split={split!r}.")
 
     band = readiness.band if readiness else "at_trend"
+    confidence = readiness.class_confidence if readiness else None
     drivers = readiness.key_drivers if readiness else {}
     acwr = drivers.get("acwr")
     acwr_high = acwr is not None and float(acwr) > 1.3
@@ -175,6 +188,7 @@ def build_workout_plan(
             deload=deload,
             acwr_high=acwr_high,
             lower_body=_is_lower_body(muscle, ex),
+            confidence=confidence,
         )
         prescriptions.append(
             ExercisePrescription(
@@ -191,8 +205,10 @@ def build_workout_plan(
     if readiness:
         readiness_summary = {
             "anchor_exercise": readiness.exercise,
-            "performance_delta_kg": readiness.performance_delta_kg,
             "band": readiness.band,
+            "class_probs": readiness.class_probs,
+            "class_confidence": readiness.class_confidence,
+            "performance_delta_kg": readiness.performance_delta_kg,
             "key_drivers": readiness.key_drivers,
         }
 

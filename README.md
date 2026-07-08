@@ -23,8 +23,8 @@ An ML + GenAI system that ingests strength-training logs plus recovery signals (
 
 ### Current scope snapshot
 
-- ✅ Complete now: ingestion, feature engineering, LightGBM training/eval artifacts
-- ⏳ Pending next: LangGraph agent, FAISS retrieval, FastAPI/Streamlit serving, Docker
+- ✅ Complete now: ingestion, features, LightGBM train/eval, LangGraph agent + RAG, agent eval harness
+- ⏳ Pending next: FastAPI/Streamlit serving, Docker
 - 🎯 Portfolio-ready today as a **model-first project** on synthetic data
 
 ### Done
@@ -33,8 +33,8 @@ An ML + GenAI system that ingests strength-training logs plus recovery signals (
 |------|-------|
 | `ingestion/` | Schema, synthetic generator, Fitbod + Apple Health loaders |
 | `features/` | Pre-workout feature pipeline, ACWR, anomaly imputation, 20% continuity filter |
-| `models/train.py` | LightGBM (Huber), 3-fold walk-forward CV, decile calibration plot, SHAP |
-| `models/baselines.py` | Naive-at-trend, global mean, per-exercise mean |
+| `models/train.py` | LightGBM classifier (primary) + Huber regression (secondary), 3-fold walk-forward CV, confusion/reliability + calibration plots, SHAP |
+| `models/baselines.py` | Majority-class + per-exercise-majority (classifier); naive-at-trend, global mean, per-exercise mean (regression) |
 | `eval/` | `model_report.md`, calibration + SHAP plots — **synthetic demo only** (regenerate before commit) |
 | `scripts/run_demo.ps1` | One command: synthetic → train → eval artifacts |
 | `docs/` | Data schema + feature engineering reference |
@@ -63,27 +63,28 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 ### Milestone 2 — Model + eval (P0)
 
 - [x] Train LightGBM vs linear vs naive baseline with **walk-forward CV**
-- [x] Target: `performance_delta` (top-set e1RM minus prior-3-session trend)
-- [x] SHAP summary plot → `eval/shap_summary.png`
-- [x] Decile calibration plot → `eval/calibration_plot.png`
+- [x] Primary target: readiness **class** (below/at/above trend, adaptive per-exercise boundary)
+- [x] Secondary target: `performance_delta` (top-set e1RM minus prior-3-session trend)
+- [x] SHAP plots → `eval/shap_summary_clf.png` (classifier), `eval/shap_summary.png` (regression)
+- [x] Confusion matrix + reliability → `eval/classification_report.png`; decile calibration → `eval/calibration_plot.png`
 - [x] Walk-forward metrics in `eval/model_report.md`
 
 ### Milestone 3 — Agent + RAG (P1)
 
-- [ ] **Research corpus** in `index/corpus/` — curated, citable sources the agent can retrieve (hypertrophy volume landmarks, progressive overload, deload/fatigue management, recovery sleep/nutrition summaries); start with 5–10 markdown snippets, expand to papers/guides as needed
-- [ ] FAISS index build + retrieval over corpus (and optionally user log excerpts)
-- [ ] **User workout preferences** (`index/corpus/personal_preferences.md`) — PPL split; infer next session from last **3–5** logged workout days; treat exercises in history as preferred; derive typical sets/reps from user's logs
-- [ ] LangGraph agent with tools: `query_history`, `predict_readiness`, `plan_workout`, `plan_block`, `explain`
-- [ ] **`plan_workout` tool** — infer next split from recent rotation, pick exercises from history for that split, propose **sets × reps × load** from logged patterns + readiness signal (hypertrophy-oriented; deload when load/recovery flags are high)
-- [ ] **Coaching policy doc** (TBD) — conservative vs aggressive loading rules tied to model uncertainty
-- [ ] Answers cite **session history + model output + retrieved research** (no unsourced coaching claims)
+- [x] **Research corpus** in `index/corpus/` — curated, citable sources the agent can retrieve (hypertrophy volume landmarks, progressive overload, deload/fatigue management, recovery sleep/nutrition summaries); start with 5–10 markdown snippets, expand to papers/guides as needed
+- [x] FAISS index build + retrieval over corpus (and optionally user log excerpts)
+- [x] **User workout preferences** (`index/corpus/personal_preferences.md`) — PPL split; infer next session from last **3–5** logged workout days; treat exercises in history as preferred; derive typical sets/reps from user's logs
+- [x] LangGraph agent with tools: `query_history`, `predict_readiness`, `plan_workout`, `plan_block`, `explain`
+- [x] **`plan_workout` tool** — infer next split from recent rotation, pick exercises from history for that split, propose **sets × reps × load** from logged patterns + readiness signal (hypertrophy-oriented; deload when load/recovery flags are high)
+- [x] **Coaching policy doc** (`index/corpus/coaching_policy.md`) — conservative vs aggressive loading rules tied to model uncertainty
+- [x] Answers cite **session history + model output + retrieved research** (no unsourced coaching claims)
 
 ### Milestone 4 — Eval + monitoring (P1)
 
-- [ ] `eval/gold_qa.jsonl` — 10–20 questions
-- [ ] Faithfulness check (citation match or LLM-judge)
+- [x] `eval/gold_qa.jsonl` — 10–20 questions
+- [x] Faithfulness check (citation match on tool/router outputs)
 - [ ] Optional LangSmith/Phoenix tracing via env var
-- [ ] `python -m eval.run_all` → `eval/results.md`
+- [x] `python -m eval.run_all` → `eval/results.md`
 
 ### Milestone 5 — Deploy + docs (P2)
 
@@ -234,11 +235,14 @@ Full formulas, anomaly detection, and diligence rationale: [`docs/feature-engine
 
 ## Modeling
 
-- **Target:** `performance_delta` (kg) — how much the session's **top-set estimated 1RM** beats or misses your **3-session rolling trend for that same exercise** (not your last workout's 1RM, not raw strength). Formula: `top_set_e1rm_kg − mean(prior 3 same-exercise top-set e1RMs)`. Full definition: [`docs/feature-engineering.md`](docs/feature-engineering.md#performance_delta-kg).
-- **Prediction output:** the model returns this delta in kg (e.g. `+2` = likely above trend, `−3` = likely below). It does not output absolute weight × reps unless combined with trend.
-- **Model:** LightGBM (Huber loss); compare against linear + naive baselines.
-- **Validation:** expanding-window **walk-forward CV** (3 folds); report MAE vs naive-at-trend.
-- **Interpretability:** SHAP feature importance — headline output like *"+1h trailing sleep ≈ +X lbs top set."*
+The headline model is a **readiness classifier**; a regression head provides a secondary magnitude estimate.
+
+- **Primary target (classification):** a readiness **band** — `below_trend` / `at_trend` / `above_trend` — for the session's **top-set estimated 1RM** vs your **3-session rolling trend for that same exercise**. Class boundaries are **adaptive per exercise** (±0.5·std of that lift's own delta), so a band means the same thing for a heavy compound and a light isolation lift.
+- **Secondary target (regression):** `performance_delta` (kg) = `top_set_e1rm_kg − mean(prior 3 same-exercise top-set e1RMs)`. This is the magnitude estimate and the source of the class labels. Full definition: [`docs/feature-engineering.md`](docs/feature-engineering.md#performance_delta-kg).
+- **Prediction output:** `predict_readiness` returns the `band`, per-class probabilities (`class_probs`), confidence, and the kg `performance_delta_kg` magnitude. The planner acts on the **class** (conservatively when confidence is low), not the raw kg.
+- **Models:** LightGBM multiclass (classifier, `class_weight="balanced"`) + LightGBM Huber (regression); compared against majority-class / per-exercise-majority and naive-at-trend baselines.
+- **Validation:** expanding-window **walk-forward CV** (3 folds). Classifier: accuracy, macro-F1, log loss, per-class ROC AUC, confusion matrix, reliability curves. Regression: MAE vs naive.
+- **Interpretability:** SHAP for both heads (`eval/shap_summary_clf.png`, `eval/shap_summary.png`).
 
 ---
 
@@ -293,18 +297,30 @@ lifting-coach-agent/
 
 **All committed eval artifacts (`eval/model_report.md`, plots) are generated from synthetic demo data only.** Personal Gravity OS runs stay local via `GRAVITYOS_DATA_DIR`.
 
-| Metric (walk-forward OOF) | Synthetic demo | Gravity OS (local reference) |
-|---------------------------|----------------|------------------------------|
-| Training rows | 1,184 | ~1,060 |
-| LightGBM MAE | 4.64 kg | ~5.13 kg |
-| Naive (0) MAE | 5.03 kg | ~5.79 kg |
-| Mean actual delta | +1.09 kg | ~+4.03 kg |
+Primary model — **readiness classifier** (walk-forward OOF):
+
+| Metric | Synthetic demo | Gravity OS (local reference) |
+|--------|----------------|------------------------------|
+| Training rows | ~1,125 | ~1,060 |
+| Accuracy | 0.54 | 0.49 |
+| Majority-class baseline | 0.43 | 0.49 |
+| Macro ROC AUC (OvR) | 0.71 | 0.57 |
+
+Secondary model — **`performance_delta` regression** (walk-forward OOF):
+
+| Metric | Synthetic demo | Gravity OS (local reference) |
+|--------|----------------|------------------------------|
+| LightGBM MAE | ~5.0 kg | ~5.1 kg |
+| Naive-at-trend MAE | ~5.5 kg | ~5.8 kg |
+
+On synthetic data the classifier clearly beats the majority baseline; on real Gravity OS data it is roughly at parity on accuracy (still above 0.50 AUC) — the honest read is that recovery signals predict *direction* better than exact kg, but the real-world signal is modest.
 
 - Correlation ≠ causation (sleep → performance is observational).
 - Confounding by deloads, illness, exercise swaps.
 - No RPE — objective proxies only.
 - Time-based validation required; random splits would inflate metrics.
-- Agent, API, and RAG layers are not implemented yet (model pipeline only).
+- The agent acts on the readiness **class** (conservatively when confidence is low), not the kg point estimate.
+- **`below_trend` recall is low** (~8–42%): most genuinely below-trend sessions get predicted `at_trend`. Accepted behavior — planning a normal session on a slightly off day is a minor outcome. When the model *does* call `below_trend`, it is high-precision (>60%) and should be acted on. An `at_trend` prediction is not a guarantee the session will go well.
 
 ---
 
@@ -326,8 +342,10 @@ python -m models.train --data-dir data/synthetic
 
 Outputs to review:
 - `eval/model_report.md`
+- `eval/classification_report.png` (confusion matrix + reliability — primary model)
+- `eval/shap_summary_clf.png` (classifier SHAP)
 - `eval/calibration_plot.png`
-- `eval/shap_summary.png`
+- `eval/shap_summary.png` (regression SHAP)
 - `eval/feature_univariate_plots.png`
 
 Or step by step:
