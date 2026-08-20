@@ -55,8 +55,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Lifting coach agent (LangGraph + tools)")
     parser.add_argument("question", nargs="?", help="Coaching question (omit for interactive mode)")
-    parser.add_argument("--data-dir", type=Path, help="Normalized data directory")
-    parser.add_argument("--gravityos-dir", type=Path, help="Gravity OS data directory")
+    parser.add_argument("--data-dir", type=Path, help="Normalized data directory (default: data/synthetic)")
     parser.add_argument("--check-llm", action="store_true", help="Test LLM endpoint and exit")
     parser.add_argument("--tools-only", action="store_true", help="Run tools without LLM (no Ollama required)")
     args = parser.parse_args()
@@ -74,8 +73,6 @@ def main() -> None:
 
     if args.data_dir:
         ctx = CoachContext(data_dir=args.data_dir)
-    elif args.gravityos_dir:
-        ctx = CoachContext(gravityos_dir=args.gravityos_dir)
     else:
         ctx = CoachContext.from_env()
 
@@ -111,8 +108,7 @@ def main() -> None:
         print(f"Failed to start agent: {exc}", file=sys.stderr)
         print(f"LLM target: {llm_endpoint_summary()}", file=sys.stderr)
         print(
-            "Brethren homelab: Tailscale on, Ollama on Brethren, model pulled. "
-            "Use --tools-only to skip LLM. See graVityOS Multi-Computer AI Homelab.md.",
+            "Ollama: start server and pull a model. Use --tools-only to skip LLM.",
             file=sys.stderr,
         )
         raise SystemExit(1) from exc
@@ -122,8 +118,7 @@ def main() -> None:
         print(f"LLM unreachable: {ping_msg}", file=sys.stderr)
         print(f"LLM target: {llm_endpoint_summary()}", file=sys.stderr)
         print(
-            "Fix: start Tailscale + Ollama on Brethren, or set OLLAMA_HOST=localhost in .env. "
-            "Or run with --tools-only.",
+            "Fix: start Ollama locally or set OLLAMA_HOST in .env. Or run with --tools-only.",
             file=sys.stderr,
         )
         raise SystemExit(1)

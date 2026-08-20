@@ -80,7 +80,7 @@ def health(ctx: CoachContext = Depends(get_ctx)):
     retriever = get_retriever()
     return {
         "status": "ok",
-        "data_dir": str(ctx.data_dir or ctx.gravityos_dir),
+        "data_dir": str(ctx.data_dir),
         "corpus_index": retriever is not None,
     }
 
@@ -184,6 +184,65 @@ def block(
     """Return a multi-week mesocycle plan."""
     raw = tools["plan_block"].invoke({"weeks": weeks})
     return _parse(raw)
+
+
+@app.get("/progress/{exercise}", tags=["coach"])
+def progress(
+    exercise: str,
+    last_n: int = Query(30, ge=5, le=100, description="Number of sessions to return"),
+    ctx: CoachContext = Depends(get_ctx),
+):
+    """Return e1RM history + readiness band for each past session of an exercise.
+
+    Used for progress charts in the UI. Runs the classifier on each historical
+    session row (not today's recovery — these are retrospective scores).
+    """
+    import pandas as pd
+
+    features = ctx.features
+    # Resolve exercise name (partial match)
+    names = features["exercise"].astype(str).unique()
+    if exercise not in names:
+        matches = [n for n in names if exercise.lower() in n.lower()]
+        if len(matches) == 1:
+            exercise = matches[0]
+        elif len(matches) > 1:
+            raise HTTPException(status_code=400, detail=f"Ambiguous exercise {exercise!r}; matches: {matches[:5]}")
+        else:
+            raise HTTPException(status_code=404, detail=f"Exercise {exercise!r} not found in history")
+
+    ex_rows = (
+        features[features["exercise"] == exercise]
+        .copy()
+        .sort_values("session_date")
+        .tail(last_n)
+    )
+
+    predictor = ctx.predictor
+    sessions = []
+    for _, row in ex_rows.iterrows():
+        try:
+            result = predictor.predict_row(row, features=features)
+            sessions.append({
+                "session_date": str(row["session_date"]),
+                "top_set_e1rm_kg": round(float(row["top_set_e1rm_kg"]), 2) if pd.notna(row.get("top_set_e1rm_kg")) else None,
+                "volume_load_kg": round(float(row["volume_load_kg"]), 1) if pd.notna(row.get("volume_load_kg")) else None,
+                "acwr": round(float(row["acwr"]), 3) if pd.notna(row.get("acwr")) else None,
+                "deload_flag": int(row.get("deload_flag", 0)),
+                "band": result.band,
+                "performance_delta_kg": result.performance_delta_kg,
+                "class_confidence": result.class_confidence,
+            })
+        except Exception:
+            # Skip rows where prediction fails (e.g. missing features)
+            sessions.append({
+                "session_date": str(row["session_date"]),
+                "top_set_e1rm_kg": round(float(row["top_set_e1rm_kg"]), 2) if pd.notna(row.get("top_set_e1rm_kg")) else None,
+                "volume_load_kg": round(float(row["volume_load_kg"]), 1) if pd.notna(row.get("volume_load_kg")) else None,
+                "band": None,
+            })
+
+    return {"exercise": exercise, "sessions": sessions, "citation": "[history] [model]"}
 
 
 @app.get("/explain", tags=["corpus"])

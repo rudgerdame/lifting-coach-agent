@@ -22,13 +22,8 @@ def init_context() -> None:
     """Called once at server startup via lifespan."""
     global _ctx, _retriever, _tools
 
-    gravityos = os.environ.get("GRAVITYOS_DATA_DIR")
     data_dir = os.environ.get("DATA_DIR", "data/synthetic")
-
-    if gravityos:
-        _ctx = CoachContext(gravityos_dir=Path(gravityos))
-    else:
-        _ctx = CoachContext(data_dir=Path(data_dir))
+    _ctx = CoachContext(data_dir=Path(data_dir))
 
     try:
         _retriever = CorpusRetriever()

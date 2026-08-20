@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -548,29 +547,3 @@ def load_features(data_dir: Path) -> pd.DataFrame:
     return build_session_features(sets, recovery)
 
 
-def load_gravityos_features(gravityos_data_dir: Path | None = None) -> pd.DataFrame:
-    """
-    Load Fitbod + Apple Health from a Gravity OS data directory (local only).
-
-    Expects:
-      {dir}/Fitbod/WorkoutExport.csv
-      {dir}/Apple Health Daily/*.csv
-    """
-    from ingestion.loaders import (
-        aggregate_apple_health_dir,
-        load_fitbod_csv,
-        workout_sets_to_dataframe,
-    )
-
-    data_dir = Path(gravityos_data_dir or os.environ["GRAVITYOS_DATA_DIR"])
-    fitbod_path = data_dir / "Fitbod" / "WorkoutExport.csv"
-    health_dir = data_dir / "Apple Health Daily"
-
-    if not fitbod_path.exists():
-        raise FileNotFoundError(f"Missing Fitbod export: {fitbod_path}")
-    if not health_dir.is_dir():
-        raise FileNotFoundError(f"Missing Apple Health directory: {health_dir}")
-
-    sets = workout_sets_to_dataframe(load_fitbod_csv(fitbod_path))
-    recovery = aggregate_apple_health_dir(health_dir)
-    return build_session_features(sets, recovery)

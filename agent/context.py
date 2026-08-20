@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from features.pipeline import load_features, load_gravityos_features
+from features.pipeline import load_features
 from models.predict import ReadinessPredictor
 
 
@@ -19,12 +19,15 @@ class CoachContext:
 
     One instance is passed to all agent tools so they share the same data view
     and model without reloading artifacts on every call.
+
+    data_dir: path to a normalized data directory containing
+        workout_sets.jsonl and recovery_daily.csv
+        (default: data/synthetic, or DATA_DIR env var)
     """
 
-    data_dir: Path | None = None
-    gravityos_dir: Path | None = None
-    model_path: Path = Path("models/artifacts/lgb_readiness.pkl")
-    meta_path: Path = Path("models/artifacts/model_meta.pkl")
+    data_dir: Path = field(default_factory=lambda: Path("data/synthetic"))
+    model_path: Path = field(default_factory=lambda: Path("models/artifacts/lgb_readiness.pkl"))
+    meta_path: Path = field(default_factory=lambda: Path("models/artifacts/model_meta.pkl"))
     _features: pd.DataFrame | None = field(default=None, init=False, repr=False)
     _workout_sets: pd.DataFrame | None = field(default=None, init=False, repr=False)
     _recovery_daily: pd.DataFrame | None = field(default=None, init=False, repr=False)
@@ -32,65 +35,31 @@ class CoachContext:
 
     @classmethod
     def from_env(cls) -> CoachContext:
-        gravityos = os.environ.get("GRAVITYOS_DATA_DIR")
-        if gravityos:
-            return cls(gravityos_dir=Path(gravityos))
-        return cls(data_dir=Path("data/synthetic"))
-
-    def _resolve_data_dir(self) -> Path:
-        if self.data_dir is not None:
-            return self.data_dir
-        if self.gravityos_dir is not None:
-            raise ValueError("Raw sets/recovery CSV paths require data_dir, not gravityos_dir")
-        raise ValueError("Set data_dir or gravityos_dir on CoachContext")
+        data_dir = os.environ.get("DATA_DIR", "data/synthetic")
+        return cls(data_dir=Path(data_dir))
 
     @property
     def features(self) -> pd.DataFrame:
         if self._features is None:
-            if self.data_dir is not None:
-                self._features = load_features(self.data_dir)
-            elif self.gravityos_dir is not None:
-                self._features = load_gravityos_features(self.gravityos_dir)
-            else:
-                raise ValueError("Set data_dir or gravityos_dir on CoachContext")
+            self._features = load_features(self.data_dir)
         return self._features
 
     @property
     def workout_sets(self) -> pd.DataFrame:
         if self._workout_sets is None:
-            if self.data_dir is not None:
-                path = self.data_dir / "workout_sets.jsonl"
-                if not path.exists():
-                    raise FileNotFoundError(f"Missing {path}")
-                self._workout_sets = pd.read_json(path, lines=True)
-            elif self.gravityos_dir is not None:
-                from ingestion.loaders import load_fitbod_csv, workout_sets_to_dataframe
-
-                fitbod = self.gravityos_dir / "Fitbod" / "WorkoutExport.csv"
-                if not fitbod.exists():
-                    raise FileNotFoundError(f"Missing {fitbod}")
-                self._workout_sets = workout_sets_to_dataframe(load_fitbod_csv(fitbod))
-            else:
-                raise ValueError("Set data_dir or gravityos_dir on CoachContext")
+            path = self.data_dir / "workout_sets.jsonl"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing {path}")
+            self._workout_sets = pd.read_json(path, lines=True)
         return self._workout_sets
 
     @property
     def recovery_daily(self) -> pd.DataFrame:
         if self._recovery_daily is None:
-            if self.data_dir is not None:
-                path = self.data_dir / "recovery_daily.csv"
-                if not path.exists():
-                    raise FileNotFoundError(f"Missing {path}")
-                self._recovery_daily = pd.read_csv(path)
-            elif self.gravityos_dir is not None:
-                from ingestion.loaders import aggregate_apple_health_dir
-
-                health_dir = self.gravityos_dir / "Apple Health Daily"
-                if not health_dir.is_dir():
-                    raise FileNotFoundError(f"Missing Apple Health directory: {health_dir}")
-                self._recovery_daily = aggregate_apple_health_dir(health_dir)
-            else:
-                raise ValueError("Set data_dir or gravityos_dir on CoachContext")
+            path = self.data_dir / "recovery_daily.csv"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing {path}")
+            self._recovery_daily = pd.read_csv(path)
         return self._recovery_daily
 
     @property
@@ -110,12 +79,12 @@ class CoachContext:
     ):
         """Predict readiness for an exercise.
 
-        ``today=True`` (default in production): score *today's planned session*
-        using current recovery metrics. This is the primary agent path.
+        ``today=True``: score *today's planned session* using current recovery
+        metrics — the primary production path.
 
         ``today=False`` + ``session_date``: score a specific past session date.
-        ``today=False`` + no date: score the most recently logged session (legacy,
-        useful for back-testing against known outcomes).
+        ``today=False`` + no date: score the most recently logged session
+        (useful for back-testing against known outcomes).
         """
         if today:
             return self.predictor.predict_today(

@@ -52,7 +52,7 @@ with st.sidebar:
     st.caption("**Quick actions**")
     quick = st.radio(
         "Jump to",
-        ["Chat", "Readiness", "Workout plan", "History", "Search corpus"],
+        ["Chat", "Readiness", "Progress", "Workout plan", "History", "Search corpus"],
         label_visibility="collapsed",
     )
 
@@ -286,11 +286,133 @@ def _search_tab() -> None:
                 st.error(str(exc))
 
 
+# ── Progress tab ──────────────────────────────────────────────────────────────
+
+def _progress_tab() -> None:
+    st.header("Exercise progress")
+    st.caption("e1RM trend and readiness band history for any exercise.")
+
+    import pandas as pd
+
+    exercise = st.text_input("Exercise name", placeholder="Dumbbell Incline Bench Press", key="progress_ex")
+    last_n = st.slider("Sessions to show", 10, 100, 30, key="progress_n")
+
+    if st.button("Load progress", type="primary") and exercise:
+        with st.spinner("Loading…"):
+            try:
+                data = _get(f"/progress/{exercise}", last_n=last_n)
+                sessions = data.get("sessions", [])
+                if not sessions:
+                    st.info("No sessions found.")
+                    return
+
+                df = pd.DataFrame(sessions)
+                df["session_date"] = pd.to_datetime(df["session_date"])
+
+                # ── e1RM over time ────────────────────────────────────────────
+                st.subheader(f"e1RM — {data.get('exercise', exercise)}")
+
+                import altair as alt
+
+                band_colours = {
+                    "above_trend": "#22c55e",
+                    "at_trend":    "#eab308",
+                    "below_trend": "#ef4444",
+                    None:          "#94a3b8",
+                }
+                df["colour"] = df["band"].map(band_colours).fillna("#94a3b8")
+                df["band_label"] = df["band"].fillna("unknown").str.replace("_", " ").str.title()
+
+                line = (
+                    alt.Chart(df)
+                    .mark_line(color="#6366f1", strokeWidth=2)
+                    .encode(
+                        x=alt.X("session_date:T", title="Date"),
+                        y=alt.Y("top_set_e1rm_kg:Q", title="Top-set e1RM (kg)", scale=alt.Scale(zero=False)),
+                        tooltip=["session_date:T", "top_set_e1rm_kg:Q", "band_label:N"],
+                    )
+                )
+                points = (
+                    alt.Chart(df)
+                    .mark_circle(size=80)
+                    .encode(
+                        x="session_date:T",
+                        y=alt.Y("top_set_e1rm_kg:Q", scale=alt.Scale(zero=False)),
+                        color=alt.Color(
+                            "band_label:N",
+                            scale=alt.Scale(
+                                domain=["Above Trend", "At Trend", "Below Trend", "Unknown"],
+                                range=["#22c55e", "#eab308", "#ef4444", "#94a3b8"],
+                            ),
+                            legend=alt.Legend(title="Readiness"),
+                        ),
+                        tooltip=["session_date:T", "top_set_e1rm_kg:Q", "band_label:N",
+                                 alt.Tooltip("performance_delta_kg:Q", format="+.2f", title="Delta (kg)"),
+                                 alt.Tooltip("class_confidence:Q", format=".0%", title="Confidence")],
+                    )
+                )
+                st.altair_chart((line + points).interactive(), use_container_width=True)
+
+                # ── Volume + ACWR ─────────────────────────────────────────────
+                with st.expander("Volume & ACWR"):
+                    vol_df = df[df["volume_load_kg"].notna()].copy()
+                    if not vol_df.empty:
+                        vol_chart = (
+                            alt.Chart(vol_df)
+                            .mark_bar(color="#818cf8", opacity=0.7)
+                            .encode(
+                                x=alt.X("session_date:T", title="Date"),
+                                y=alt.Y("volume_load_kg:Q", title="Volume load (kg)"),
+                                tooltip=["session_date:T", "volume_load_kg:Q",
+                                         alt.Tooltip("acwr:Q", format=".2f", title="ACWR")],
+                            )
+                        )
+                        acwr_line = (
+                            alt.Chart(vol_df[vol_df["acwr"].notna()])
+                            .mark_line(color="#f59e0b", strokeWidth=2, strokeDash=[4, 2])
+                            .encode(
+                                x="session_date:T",
+                                y=alt.Y("acwr:Q", title="ACWR", scale=alt.Scale(zero=False)),
+                            )
+                        )
+                        st.altair_chart(
+                            alt.layer(vol_chart).resolve_scale(y="independent").interactive(),
+                            use_container_width=True,
+                        )
+                        st.altair_chart(acwr_line.interactive(), use_container_width=True)
+
+                # ── Summary stats ─────────────────────────────────────────────
+                with st.expander("Summary"):
+                    valid = df[df["top_set_e1rm_kg"].notna()]
+                    if not valid.empty:
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Sessions", len(valid))
+                        col2.metric("Best e1RM", f"{valid['top_set_e1rm_kg'].max():.1f} kg")
+                        col3.metric("Latest e1RM", f"{valid.iloc[-1]['top_set_e1rm_kg']:.1f} kg")
+                        delta_pct = (
+                            (valid.iloc[-1]["top_set_e1rm_kg"] - valid.iloc[0]["top_set_e1rm_kg"])
+                            / valid.iloc[0]["top_set_e1rm_kg"] * 100
+                        ) if len(valid) > 1 else 0
+                        col4.metric("Progress", f"{delta_pct:+.1f}%")
+
+                        band_counts = df["band_label"].value_counts()
+                        st.caption("Readiness distribution: " + " · ".join(
+                            f"{k}: {v}" for k, v in band_counts.items()
+                        ))
+
+            except httpx.HTTPStatusError as exc:
+                detail = exc.response.json().get("detail", str(exc))
+                st.error(detail)
+            except Exception as exc:
+                st.error(str(exc))
+
+
 # ── Route to active tab ───────────────────────────────────────────────────────
 
 tabs = {
     "Chat": _chat_tab,
     "Readiness": _readiness_tab,
+    "Progress": _progress_tab,
     "Workout plan": _plan_tab,
     "History": _history_tab,
     "Search corpus": _search_tab,

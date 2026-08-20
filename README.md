@@ -4,7 +4,7 @@ An ML + GenAI system that ingests strength-training logs plus recovery signals (
 
 **Portfolio goal:** Demonstrate MLE Co-Op (LLM/GenAI team) skills — trained tabular ML, LangGraph agent, RAG/FAISS, eval harness, Docker deploy, provider-swappable local LLM.
 
-**Personal goal:** Eventually plug into [Gravity OS](https://github.com/) (private Obsidian vault + TS automation at `C:\Users\rhdam\graVityOS-Project`) via CSV export schema. 
+**Personal goal:** Replace the synthetic data with real Fitbod + Apple Health exports via the normalized CSV schema (`docs/data-schema.md`).
 
 ---
 
@@ -13,13 +13,13 @@ An ML + GenAI system that ingests strength-training logs plus recovery signals (
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Which portfolio project? | **Training Log Coach** | Best fit with existing Fitbod + Apple Health data; strong ML + agent signal; personal story |
-| Gravity OS integration | **Data bridge only** via `GRAVITYOS_DATA_DIR` env var | Never merge Python ML into private vault repo; never commit personal data
+| Personal data | **Bring your own CSVs** via `DATA_DIR` env var | Never commit personal data; synthetic path always works
 
 ---
 
 ## Build status
 
-**ML pipeline is runnable end-to-end on synthetic or local Gravity OS data.** Agent, API, RAG, and Docker are still pending.
+**Full stack is runnable end-to-end** on synthetic data. Bring your own Fitbod + Apple Health CSVs via `DATA_DIR` to run on real data.
 
 ### Current scope snapshot
 
@@ -57,8 +57,7 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 
 - [x] Verify `python -m ingestion.synthetic --out data/synthetic` runs
 - [x] Complete feature pipeline: ACWR, recovery deviation/lags, day-of-week, deload flag
-- [x] Apple Health daily aggregator via Gravity OS loader path
-- [x] `--gravityos` loader path via `GRAVITYOS_DATA_DIR`
+- [x] Apple Health daily aggregator (export to CSV, place in `DATA_DIR`)
 
 ### Milestone 2 — Model + eval (P0)
 
@@ -116,14 +115,14 @@ Target: **portfolio-ready v1 in ~2–3 weeks part-time** on synthetic data. Real
 - HealthKit integration
 - vLLM + quantization benchmarks (Ollama + one latency note is enough)
 - PDF statement parsing (that's finance project)
-- Merging into Gravity OS repo
+- Merging with private vault repos
 - Fine-tuned DistilBERT or deep learning classifiers
 
 ### Long-term roadmap (context only)
 
 | Phase | Work |
 |-------|------|
-| Phase 2 | Point coach at real Fitbod + Apple Health via `GRAVITYOS_DATA_DIR`; homelab deploy on Brethren |
+| Phase 2 | Point coach at real Fitbod + Apple Health exports via `DATA_DIR`; homelab deploy on local Ollama |
 | Phase 3 | Expand research corpus; hypertrophy plan generator (exercise × sets × reps) tuned to user preferences and readiness model |
 | Phase 4 | Minimal iOS logger — local store + JSON/CSV export matching `docs/data-schema.md` |
 | Phase 5 | Shared FastAPI backend; app sync; Telegram coaching hook (reuse Gravity OS pattern) |

@@ -22,7 +22,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from features.pipeline import load_features, load_gravityos_features
+from features.pipeline import load_features
 from models.labeling import CLASS_NAMES
 
 ARTIFACTS_DIR = Path("models/artifacts")
@@ -246,22 +246,13 @@ class ReadinessPredictor:
         return self.predict_row(row)
 
 
-def load_feature_matrix(
-    *,
-    data_dir: Path | None = None,
-    gravityos_dir: Path | None = None,
-) -> pd.DataFrame:
-    if data_dir is not None:
-        return load_features(data_dir)
-    if gravityos_dir is not None:
-        return load_gravityos_features(gravityos_dir)
-    raise ValueError("Provide data_dir or gravityos_dir")
+def load_feature_matrix(data_dir: Path) -> pd.DataFrame:
+    return load_features(data_dir)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Predict session readiness class (+ magnitude)")
-    parser.add_argument("--data-dir", type=Path, help="Normalized data directory")
-    parser.add_argument("--gravityos-dir", type=Path, help="Gravity OS data directory")
+    parser.add_argument("--data-dir", type=Path, default=Path("data/synthetic"), help="Normalized data directory")
     parser.add_argument("--exercise", required=True, help="Exercise name (partial match OK)")
     parser.add_argument("--session-date", help="YYYY-MM-DD (default: most recent session)")
     parser.add_argument(
@@ -280,30 +271,15 @@ def main() -> None:
     parser.add_argument("--meta", type=Path, default=META_PATH)
     args = parser.parse_args()
 
-    if not args.data_dir and not args.gravityos_dir:
-        args.data_dir = Path("data/synthetic")
-
     predictor = ReadinessPredictor(model_path=args.model, meta_path=args.meta)
 
     if args.today and not args.session_date:
         import pandas as pd
-        from pathlib import Path as _Path
-
-        if args.data_dir:
-            sets = pd.read_json(args.data_dir / "workout_sets.jsonl", lines=True)
-            recovery = pd.read_csv(args.data_dir / "recovery_daily.csv")
-        else:
-            from ingestion.loaders import (
-                aggregate_apple_health_dir,
-                load_fitbod_csv,
-                workout_sets_to_dataframe,
-            )
-            gdir = _Path(args.gravityos_dir)
-            sets = workout_sets_to_dataframe(load_fitbod_csv(gdir / "Fitbod" / "WorkoutExport.csv"))
-            recovery = aggregate_apple_health_dir(gdir / "Apple Health Daily")
+        sets = pd.read_json(args.data_dir / "workout_sets.jsonl", lines=True)
+        recovery = pd.read_csv(args.data_dir / "recovery_daily.csv")
         result = predictor.predict_today(args.exercise, sets, recovery)
     else:
-        features = load_feature_matrix(data_dir=args.data_dir, gravityos_dir=args.gravityos_dir)
+        features = load_feature_matrix(args.data_dir)
         result = predictor.predict(features, args.exercise, args.session_date)
 
     print(json.dumps(result.__dict__, indent=2))

@@ -11,3 +11,6 @@
 {"id": "router_corpus_nl", "mode": "router", "question": "How much protein do I need for recovery?", "expected_tool": "search_corpus", "must_contain": ["recovery_nutrition", "hits"], "required_citations": ["recovery_nutrition.md"]}
 {"id": "router_explain_nl", "mode": "router", "question": "Why does sleep affect my lifts?", "expected_tool": "explain", "must_contain": ["performance_delta"], "required_citations": ["[model]"]}
 {"id": "tool_predict_readiness_today", "tool": "predict_readiness", "tool_args": {"exercise": "Dumbbell Incline Bench Press", "today": true}, "must_contain": ["performance_delta_kg", "band", "session_date"], "required_citations": ["[model]"]}
+{"id": "llm_readiness_citations", "mode": "llm_synthesis", "question": "Am I ready for bench today?", "must_contain": ["sleep", "trend"], "required_citations": ["[model]"], "must_not_contain": ["I don't know", "no data available"]}
+{"id": "llm_plan_citations", "mode": "llm_synthesis", "question": "Plan my next workout", "must_contain": ["sets", "kg"], "required_citations": ["[history]", "[model]"], "must_not_contain": ["I cannot", "I don't have access"]}
+{"id": "llm_corpus_grounding", "mode": "llm_synthesis", "question": "How much volume do I need for hypertrophy?", "must_contain": ["volume"], "required_citations": ["volume_landmarks.md"], "must_not_contain": ["I don't know"]}

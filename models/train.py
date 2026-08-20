@@ -25,7 +25,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from features.pipeline import CONTINUITY_DROP_PCT, load_features, load_gravityos_features
+from features.pipeline import CONTINUITY_DROP_PCT, load_features
 from models.baselines import (
     MajorityClass,
     NaiveAtTrend,
@@ -843,16 +843,11 @@ def _synthetic_data_label(data_dir: Path) -> str:
 
 
 def train(
-    data_dir: Path | None = None,
-    gravityos_dir: Path | None = None,
+    data_dir: Path = Path("data/synthetic"),
     n_folds: int = DEFAULT_N_FOLDS,
     class_k: float = DEFAULT_K,
 ) -> None:
-    if gravityos_dir is not None:
-        df = load_gravityos_features(gravityos_dir)
-        data_label = f"Gravity OS ({gravityos_dir})"
-    else:
-        assert data_dir is not None
+    if True:
         df = load_features(data_dir)
         data_label = _synthetic_data_label(data_dir)
 
@@ -1218,8 +1213,6 @@ Left: row-normalized OOF confusion matrix. Right: reliability curves for
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train readiness model")
     parser.add_argument("--data-dir", type=Path, default=Path("data/synthetic"))
-    parser.add_argument("--gravityos", action="store_true")
-    parser.add_argument("--gravityos-dir", type=Path, default=None)
     parser.add_argument("--folds", type=int, default=DEFAULT_N_FOLDS)
     parser.add_argument(
         "--class-k",
@@ -1229,11 +1222,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.gravityos:
-        gravityos_dir = args.gravityos_dir or Path(os.environ["GRAVITYOS_DATA_DIR"])
-        train(gravityos_dir=gravityos_dir, n_folds=args.folds, class_k=args.class_k)
-    else:
-        train(data_dir=args.data_dir, n_folds=args.folds, class_k=args.class_k)
+    train(data_dir=args.data_dir, n_folds=args.folds, class_k=args.class_k)
 
 
 if __name__ == "__main__":

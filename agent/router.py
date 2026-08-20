@@ -18,25 +18,46 @@ def _exercise_from_question(q: str) -> str:
     return "Incline Bench"
 
 
+_EXERCISE_KEYWORDS = (
+    "bench", "incline", "squat", "deadlift", "row", "curl", "press",
+    "pulldown", "pullup", "dip", "lunge", "thrust", "extension", "fly",
+)
+
+
+def _mentions_exercise(q: str) -> bool:
+    return any(w in q for w in _EXERCISE_KEYWORDS)
+
+
 def route_question(question: str, tools: dict[str, BaseTool]) -> tuple[str, str]:
     """Return (tool_name, json_output) for a natural-language question."""
     q = question.lower()
-    if any(w in q for w in ("plan", "workout", "train next", "what should i")):
-        return "plan_workout", tools["plan_workout"].invoke({"split": None})
-    if "explain" in q or q.startswith("why") or " why " in f" {q} ":
-        return "explain", tools["explain"].invoke({"topic": question})
-    if any(w in q for w in ("ready", "readiness", "heavy", "performance")):
+
+    # History questions beat readiness even when they mention an exercise
+    # e.g. "What did I bench recently?" → query_history, not predict_readiness
+    _HISTORY_WORDS = ("history", "last", "logged", "when did", "recently", "recent", "what did", "what have i")
+    if any(w in q for w in _HISTORY_WORDS):
+        exercise = _exercise_from_question(q) if _mentions_exercise(q) else None
+        return "query_history", tools["query_history"].invoke(
+            {"exercise": exercise, "split": None, "last_n_sessions": 5}
+        )
+
+    # Exercise-specific readiness: "What should I try benching today?" → predict_readiness
+    if _mentions_exercise(q) and any(
+        w in q for w in ("try", "do", "ready", "readiness", "heavy", "performance", "today", "attempt", "should")
+    ):
         exercise = _exercise_from_question(q)
         return "predict_readiness", tools["predict_readiness"].invoke(
             {"exercise": exercise, "session_date": None}
         )
-    if any(
-        w in q
-        for w in ("history", "last", "logged", "when did", "recently", "recent", "what did", "what have i")
-    ):
-        exercise = _exercise_from_question(q) if any(w in q for w in ("bench", "squat", "incline")) else None
-        return "query_history", tools["query_history"].invoke(
-            {"exercise": exercise, "split": None, "last_n_sessions": 5}
+
+    if any(w in q for w in ("plan", "workout", "train next", "what should i")):
+        return "plan_workout", tools["plan_workout"].invoke({"split": None})
+    if "explain" in q or q.startswith("why") or " why " in f" {q} ":
+        return "explain", tools["explain"].invoke({"topic": question})
+    if any(w in q for w in ("ready", "readiness", "heavy", "performance")) or _mentions_exercise(q):
+        exercise = _exercise_from_question(q)
+        return "predict_readiness", tools["predict_readiness"].invoke(
+            {"exercise": exercise, "session_date": None}
         )
     if any(w in q for w in ("volume", "deload", "sleep", "protein", "hypertrophy")):
         return "search_corpus", tools["search_corpus"].invoke({"query": question, "k": 3})

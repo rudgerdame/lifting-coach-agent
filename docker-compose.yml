@@ -5,9 +5,7 @@ services:
       - "8000:8000"
     environment:
       - DATA_DIR=data/synthetic
-      # Uncomment to use personal data via Gravity OS:
-      # - GRAVITYOS_DATA_DIR=/data/gravityos
-      # Uncomment for Ollama on Brethren:
+      # Uncomment for local Ollama:
       # - LLM_PROVIDER=ollama
       # - OLLAMA_HOST=http://brethren:11434
       # Uncomment for Cursor SDK:
